@@ -48,14 +48,21 @@ Design rules the code will follow:
   suggests. It gets control after the logs show it deserves it.
 - **Act, ask, stop.** Every step has an explicit rule for when the agent
   proceeds, asks a human, or halts.
+- **Publish safely.** `Voice`, `Renderer` and `Publisher` are interfaces with
+  mocks. The publisher defaults to dry-run; a real upload is unlisted and needs
+  approval. Nothing goes public without an explicit autonomy policy.
 
-## Plan
+## Plan (living, it changes when something fails)
 
 | Days | Focus |
 | --- | --- |
-| 2 to 6 | Provider seam, agent loop, tools and validation, state machine, first real LLM |
+| 2 to 4 | Provider seam, agent loop, tools and validation |
+| 5 | State machine and a walking skeleton: topic, script, voice, render, publish, end to end with mock adapters |
+| 6 | First real LLM, week one wrap-up |
 | 7 to 11 | QA gates, idempotent retries, FixEngine, shadow-mode LLM reasoner, evals |
-| 12 to 15 | Approval gates and autonomy levels, guardrails, CI and demo, launch |
+| 12 to 13 | Approval gates and autonomy levels, guardrails (budget, attempts, allow-list) |
+| 14 | Real voice, render and YouTube adapters, first real upload as unlisted behind approval |
+| 15 | Launch: CI, Docker compose, one-command demo, README, walkthrough |
 | Bonus | Concurrency experiment: serial versus parallel on the same golden set |
 
 Every day's failures are written down in [FAILURE_LOG.md](FAILURE_LOG.md).
