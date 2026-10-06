@@ -1,0 +1,17 @@
+# binaries
+/bin/
+*.exe
+*.test
+/demo
+
+# local state and secrets
+.env
+.env.*
+*.db
+*.sqlite
+*.log
+
+# OS and editor
+.DS_Store
+.idea/
+.vscode/
