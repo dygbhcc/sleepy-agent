@@ -1,0 +1,8 @@
+# Every change needs a review from the maintainer.
+* @dygbhcc
+
+# Safety critical areas, keep these explicit.
+/.github/ @dygbhcc
+/CLAUDE.md @dygbhcc
+/CONTRIBUTING.md @dygbhcc
+/internal/publish/ @dygbhcc
