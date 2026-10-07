@@ -3,7 +3,7 @@
 These rules apply to every contributor and every AI assistant working in this repo.
 
 1. **English only inside the repo.** Identifiers, comments, log and error messages, test names, commit messages and docs are always written in English. Never Turkish, no exceptions.
-2. **No agent frameworks.** The point of the project is to build the agent loop from scratch. Standard library first.
+2. **No agent frameworks.** The point of the project is to build the agent loop from scratch. Standard library first. Any other dependency needs a stated reason, and API client libraries (for example Google's) stay inside their own adapter package.
 3. **Everything goes through `llm.Provider`.** Tests use the mock provider and never need a network or an API key.
 4. **Never commit secrets.** No API keys, tokens, `.env` files or databases. The repo is public from day one.
 5. **Before every commit** run `make lint` and `make test`.

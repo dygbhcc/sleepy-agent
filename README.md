@@ -5,20 +5,22 @@ framework. The goal is to learn what actually works when an AI system has to
 reason, use tools, make decisions and take action, and to share the
 architecture, the failures and the trade-offs along the way.
 
-The running example is an automated episode pipeline: a topic goes in, an
+The code is being extracted piece by piece from Sleepy, my own project that
+already produces sleep-narration videos, and wrapped in an agent layer. The
+running example is an automated episode pipeline: a topic goes in, an
 episode (title, script, later narration and video) comes out, with quality
 gates, self-healing and human approval where it matters.
 
-> Status: **Day 2 of 15.** Scaffold, provider interface and a mock provider.
-> The pipeline is intentionally naive; it gets replaced by a real state
-> machine on Day 5.
+> Status: **Day 3 of 10.** The agent loop, tools, a `Decider` and a Groq
+> provider exist. The episode pipeline is still the naive Day 2 version; the
+> real state machine is ported from Sleepy on Day 4.
 
 ## Run it
 
 Needs Go 1.23 or newer. No API key, no network.
 
 ```bash
-make demo   # one end-to-end run with the mock provider
+make demo   # the agent loop; scripted mock, or a real model if GROQ_API_KEY is set
 make test   # tests with the race detector
 make lint   # gofmt and go vet
 ```
@@ -54,16 +56,17 @@ Design rules the code will follow:
 
 ## Plan (living, it changes when something fails)
 
-| Days | Focus |
+| Day | Focus |
 | --- | --- |
-| 2 to 4 | Provider seam, agent loop, tools and validation |
-| 5 | State machine and a walking skeleton: topic, script, voice, render, publish, end to end with mock adapters |
-| 6 | First real LLM, week one wrap-up |
-| 7 to 11 | QA gates, idempotent retries, FixEngine, shadow-mode LLM reasoner, evals |
-| 12 to 13 | Approval gates and autonomy levels, guardrails (budget, attempts, allow-list) |
-| 14 | Real voice, render and YouTube adapters, first real upload as unlisted behind approval |
-| 15 | Launch: CI, Docker compose, one-command demo, README, walkthrough |
-| Bonus | Concurrency experiment: serial versus parallel on the same golden set |
+| 1 to 2 | Launch, repo, provider seam, mock provider, first measured failure |
+| 3 | Agent loop, tools with validation, `Decider` (act, ask, stop), Groq provider |
+| 4 | State machine and worker loop ported from Sleepy; walking skeleton with mock adapters |
+| 5 | QA gates ported; first real LLM pipeline; the known gap tests flip to reject |
+| 6 | Idempotency and FixEngine; a `Store` interface (in memory or file first, Postgres optional later) |
+| 7 | Shadow-mode LLM reasoner and evals |
+| 8 | Approval gates, autonomy levels, guardrails (budget, attempts, allow-list) |
+| 9 | Real voice, render and YouTube adapters, first real upload as unlisted behind approval |
+| 10 | Launch: CI, Docker compose, one-command demo, walkthrough |
 
 Every day's failures are written down in [FAILURE_LOG.md](FAILURE_LOG.md).
 

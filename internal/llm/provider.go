@@ -27,6 +27,9 @@ type Request struct {
 	Messages    []Message
 	Temperature float64
 	MaxTokens   int
+	// JSON asks the provider to constrain the reply to a single JSON object.
+	// Providers that cannot do this ignore it.
+	JSON bool
 }
 
 // Usage is the token accounting for one call. Cost guardrails (Day 13)
