@@ -89,7 +89,7 @@ Design rules the code follows:
   mode, one task, so not a reliability claim). `gpt-oss-20b` and `gpt-oss-120b`:
   native 5/5, prompt based 0/5 (HTTP 400 on Groq). `qwen/qwen3.8-27b`: 5/5 in
   both modes, native used about 1.9x the tokens (3241 vs 1718 per run). The
-  cause of the token difference is not measured.
+  cause of the token difference is not measured. Full tables: `docs/tool-calling-comparison.md`.
 - A step that crashes in the middle is run again from its start. Idempotency
   (input hashes) arrives on Day 7.
 
