@@ -4,26 +4,30 @@
 // Without an API key it uses a scripted mock, so the loop is visible and
 // repeatable. Set GROQ_API_KEY to run the same task with a real model.
 // GROQ_MODEL is required with a key, there is no default model.
+//
+// AGENT_MODE picks how the model is driven: "prompt" (default, tools in the
+// prompt, JSON reply) or "native" (the provider's tool calling API). Use
+// `make compare` to measure both side by side.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"sleepy-agent/internal/agent"
 	"sleepy-agent/internal/llm"
+	"sleepy-agent/internal/scenario"
 	"sleepy-agent/internal/tools"
 )
 
-const draft = "Settle in. Let your shoulders soften. Somewhere beyond the hedge, the night air moves slowly " +
-	"through the leaves, and every star above you is perfectly still."
-
 func main() {
-	provider, mode := chooseProvider()
+	mode := os.Getenv("AGENT_MODE")
+	if mode == "" {
+		mode = scenario.ModePrompt
+	}
+	provider, label := chooseProvider(mode)
 
 	a, err := agent.New(provider, tools.All(), agent.AlwaysAct{}, agent.Config{MaxSteps: 8})
 	if err != nil {
@@ -31,15 +35,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	task := "Check this draft script for a 5 minute sleep episode. Use the tools to measure it against the policy " +
-		"and for repetition, then give a short verdict.\n\nDRAFT:\n" + draft
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	res, err := a.Run(ctx, task)
+	res, err := a.Run(ctx, scenario.Task)
 	fmt.Printf("provider  : %s\n", provider.Name())
-	fmt.Printf("mode      : %s\n\n", mode)
+	fmt.Printf("mode      : %s\n\n", label)
 	if res != nil {
 		printTrace(res)
 	}
@@ -49,35 +50,25 @@ func main() {
 	}
 }
 
-func chooseProvider() (llm.Provider, string) {
+func chooseProvider(mode string) (llm.Provider, string) {
 	if key := os.Getenv("GROQ_API_KEY"); key != "" {
 		model := os.Getenv("GROQ_MODEL")
 		if model == "" {
 			fmt.Fprintln(os.Stderr, "GROQ_MODEL is required when GROQ_API_KEY is set (see https://api.groq.com/openai/v1/models)")
 			os.Exit(2)
 		}
-		return llm.NewGroq(key, model), "real model"
+		p, err := scenario.Adapt(mode, llm.NewGroq(key, model))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return p, "real model, " + mode + " tool calling"
 	}
-	return scriptedMock(), "scripted mock (canned answers, not a real model)"
-}
-
-// scriptedMock plays the three calls a sensible model would make, then a
-// verdict computed from the same numbers the tools return.
-func scriptedMock() llm.Provider {
-	call := func(tool string, args map[string]any) string {
-		b, _ := json.Marshal(map[string]any{"tool": tool, "args": args})
-		return string(b)
+	var mock llm.Provider = scenario.ScriptedNative()
+	if mode == scenario.ModePrompt {
+		mock = llm.NewPromptTools(scenario.ScriptedPrompt())
 	}
-	words := len(strings.Fields(draft))
-	verdict, _ := json.Marshal(map[string]string{
-		"final": fmt.Sprintf("Too short: %d words, the minimum for 5 minutes is 500. No repetition problem.", words),
-	})
-	return llm.NewMock(
-		call("get_policy", map[string]any{"duration_minutes": 5}),
-		call("count_words", map[string]any{"text": draft}),
-		call("check_repetition", map[string]any{"text": draft}),
-		string(verdict),
-	)
+	return mock, "scripted mock, " + mode + " tool calling (canned answers, not a real model)"
 }
 
 func printTrace(res *agent.Result) {

@@ -53,6 +53,7 @@ type chatRequest struct {
 	Messages    []chatMessage `json:"messages"`
 	Temperature float64       `json:"temperature"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Tools       []wireTool    `json:"tools,omitempty"`
 	// ResponseFormat forces a JSON object reply. Without it, some models
 	// (gpt-oss on Groq) try a native tool call and the API answers HTTP 400.
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
@@ -63,8 +64,30 @@ type responseFormat struct {
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content"`
+	ToolCalls  []wireToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type wireTool struct {
+	Type     string       `json:"type"`
+	Function wireFunction `json:"function"`
+}
+
+type wireFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+type wireToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 type chatResponse struct {
@@ -84,11 +107,23 @@ type chatResponse struct {
 // errs.TransientError so callers can retry them, everything else is permanent.
 func (p *OpenAICompat) Complete(ctx context.Context, req Request) (Response, error) {
 	body := chatRequest{Model: p.model, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
-	if req.JSON {
+	if req.JSON && len(req.Tools) == 0 {
 		body.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
+	for _, t := range req.Tools {
+		body.Tools = append(body.Tools, wireTool{Type: "function", Function: wireFunction{
+			Name: t.Name, Description: t.Description, Parameters: t.Parameters,
+		}})
+	}
 	for _, m := range req.Messages {
-		body.Messages = append(body.Messages, chatMessage{Role: string(m.Role), Content: m.Content})
+		wm := chatMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID}
+		for _, c := range m.ToolCalls {
+			args, _ := json.Marshal(c.Args)
+			tc := wireToolCall{ID: c.ID, Type: "function"}
+			tc.Function.Name, tc.Function.Arguments = c.Name, string(args)
+			wm.ToolCalls = append(wm.ToolCalls, tc)
+		}
+		body.Messages = append(body.Messages, wm)
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -136,11 +171,22 @@ func (p *OpenAICompat) Complete(ctx context.Context, req Request) (Response, err
 		return Response{}, fmt.Errorf("%s: response had no choices", p.name)
 	}
 
-	return Response{
-		Content: parsed.Choices[0].Message.Content,
+	msg := parsed.Choices[0].Message
+	out := Response{
+		Content: msg.Content,
 		Usage: Usage{
 			PromptTokens:     parsed.Usage.PromptTokens,
 			CompletionTokens: parsed.Usage.CompletionTokens,
 		},
-	}, nil
+	}
+	for _, c := range msg.ToolCalls {
+		args := map[string]any{}
+		if strings.TrimSpace(c.Function.Arguments) != "" {
+			if err := json.Unmarshal([]byte(c.Function.Arguments), &args); err != nil {
+				return out, fmt.Errorf("%w: tool call %q has unreadable arguments: %v", ErrMalformedReply, c.Function.Name, err)
+			}
+		}
+		out.ToolCalls = append(out.ToolCalls, ToolCall{ID: c.ID, Name: c.Function.Name, Args: args})
+	}
+	return out, nil
 }

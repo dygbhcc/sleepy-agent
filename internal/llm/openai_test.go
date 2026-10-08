@@ -156,3 +156,73 @@ func TestJSONModeSendsResponseFormat(t *testing.T) {
 		t.Fatal("response_format must be absent when JSON is off")
 	}
 }
+
+func TestOpenAICompatNativeToolsRoundTrip(t *testing.T) {
+	var gotBody chatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[` +
+			`{"id":"call_1","type":"function","function":{"name":"count_words","arguments":"{\"text\":\"a b\"}"}}]}}],` +
+			`"usage":{"prompt_tokens":9,"completion_tokens":4}}`))
+	}))
+	defer srv.Close()
+
+	resp, err := newTestProvider(srv).Complete(context.Background(), Request{
+		JSON:  true, // must not be sent together with tools
+		Tools: []ToolSpec{countSpec},
+		Messages: []Message{
+			{Role: RoleUser, Content: "go"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_0", Name: "count_words", Args: map[string]any{"text": "x"}}}},
+			{Role: RoleTool, ToolCallID: "call_0", Content: "1"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "call_1" || resp.ToolCalls[0].Name != "count_words" ||
+		resp.ToolCalls[0].Args["text"] != "a b" || resp.Usage.PromptTokens != 9 {
+		t.Fatalf("unexpected response %+v", resp)
+	}
+	if len(gotBody.Tools) != 1 || gotBody.Tools[0].Type != "function" || gotBody.Tools[0].Function.Name != "count_words" {
+		t.Fatalf("tools not sent: %+v", gotBody.Tools)
+	}
+	if gotBody.ResponseFormat != nil {
+		t.Fatal("JSON mode must not be combined with native tools")
+	}
+	asst, tool := gotBody.Messages[1], gotBody.Messages[2]
+	if len(asst.ToolCalls) != 1 || asst.ToolCalls[0].ID != "call_0" || asst.ToolCalls[0].Function.Arguments != `{"text":"x"}` {
+		t.Fatalf("assistant tool call not encoded: %+v", asst)
+	}
+	if tool.Role != "tool" || tool.ToolCallID != "call_0" {
+		t.Fatalf("tool result not encoded: %+v", tool)
+	}
+}
+
+func TestOpenAICompatUnreadableToolArgumentsAreMalformedNotFatal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[` +
+			`{"id":"c","type":"function","function":{"name":"count_words","arguments":"{\"text\": "}}]}}],` +
+			`"usage":{"prompt_tokens":5,"completion_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	resp, err := newTestProvider(srv).Complete(context.Background(), Request{Tools: []ToolSpec{countSpec}})
+	if !errors.Is(err, ErrMalformedReply) {
+		t.Fatalf("want ErrMalformedReply, got %v", err)
+	}
+	if resp.Usage.CompletionTokens != 3 {
+		t.Fatalf("usage must survive a malformed reply, got %+v", resp.Usage)
+	}
+}
+
+func TestOpenAICompatToolCallWithNoArgumentsGetsAnEmptyMap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[` +
+			`{"id":"c","type":"function","function":{"name":"ping","arguments":""}}]}}]}`))
+	}))
+	defer srv.Close()
+	resp, err := newTestProvider(srv).Complete(context.Background(), Request{})
+	if err != nil || len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Args == nil {
+		t.Fatalf("resp %+v err %v", resp, err)
+	}
+}

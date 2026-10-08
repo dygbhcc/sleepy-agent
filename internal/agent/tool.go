@@ -8,6 +8,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -36,6 +37,26 @@ type Prop struct {
 type Schema struct {
 	Properties map[string]Prop
 	Required   []string
+}
+
+// JSONSchema renders the schema as a JSON Schema object, the format native
+// tool calling APIs expect.
+func (s Schema) JSONSchema() json.RawMessage {
+	props := make(map[string]any, len(s.Properties))
+	for name, p := range s.Properties {
+		props[name] = map[string]string{"type": p.Type, "description": p.Description}
+	}
+	required := s.Required
+	if required == nil {
+		required = []string{}
+	}
+	b, _ := json.Marshal(map[string]any{
+		"type":                 "object",
+		"properties":           props,
+		"required":             required,
+		"additionalProperties": false,
+	})
+	return b
 }
 
 // Validate checks args against the schema. The model's arguments are

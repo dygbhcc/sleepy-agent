@@ -12,7 +12,7 @@ These rules apply to every contributor and every AI assistant working in this re
 
 ## Layout
 
-- `internal/agent`: agent loop, tools, `Decider`. `internal/llm`: `Provider`, mock, Groq client.
+- `internal/agent`: agent loop, tools, `Decider`. `internal/llm`: `Provider`, mock, Groq client, and the two tool calling adapters (native in `OpenAICompat`, `PromptTools` for the rest). The agent only sees `llm.ToolCall`, never a model specific format.
 - `internal/domain`, `internal/runner`, `internal/store`: the run state machine, worker loop and storage.
 - `internal/pipeline`: the naive Day 2 generator, temporary. `cmd/`: demos.
 

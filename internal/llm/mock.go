@@ -18,7 +18,7 @@ var ErrScriptExhausted = errors.New("llm mock: script exhausted")
 // reuse it.
 type Mock struct {
 	mu       sync.Mutex
-	script   []string
+	script   []Response
 	next     int
 	requests []Request
 	failNext []error
@@ -26,6 +26,16 @@ type Mock struct {
 
 // NewMock returns a Mock that answers with the given responses, in order.
 func NewMock(script ...string) *Mock {
+	rs := make([]Response, len(script))
+	for i, s := range script {
+		rs[i] = Response{Content: s}
+	}
+	return &Mock{script: rs}
+}
+
+// NewMockResponses returns a Mock that answers with full Responses, so tests
+// can script native tool calls. Usage is estimated when left zero.
+func NewMockResponses(script ...Response) *Mock {
 	return &Mock{script: script}
 }
 
@@ -70,13 +80,13 @@ func (m *Mock) Complete(ctx context.Context, req Request) (Response, error) {
 	out := m.script[m.next]
 	m.next++
 
-	return Response{
-		Content: out,
-		Usage: Usage{
+	if out.Usage == (Usage{}) {
+		out.Usage = Usage{
 			PromptTokens:     approxTokens(req),
-			CompletionTokens: len(strings.Fields(out)),
-		},
-	}, nil
+			CompletionTokens: len(strings.Fields(out.Content)) + len(out.ToolCalls),
+		}
+	}
+	return out, nil
 }
 
 // approxTokens is a deliberately crude estimate (one token per word). The

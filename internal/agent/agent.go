@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -86,12 +85,17 @@ func New(p llm.Provider, tools []Tool, d Decider, cfg Config) (*Agent, error) {
 }
 
 // Run executes the loop for one task.
+//
+// The agent speaks one normalized format (llm.ToolCall in, llm.RoleTool out).
+// Whether the model underneath uses native tool calling or a JSON-in-prompt
+// protocol is the adapter's business, see llm.PromptTools.
 func (a *Agent) Run(ctx context.Context, task string) (*Result, error) {
 	res := &Result{}
 	msgs := []llm.Message{
-		{Role: llm.RoleSystem, Content: a.systemPrompt()},
+		{Role: llm.RoleSystem, Content: systemPrompt},
 		{Role: llm.RoleUser, Content: task},
 	}
+	specs := a.specs()
 
 	for i := 1; i <= a.cfg.MaxSteps; i++ {
 		if err := ctx.Err(); err != nil {
@@ -102,42 +106,54 @@ func (a *Agent) Run(ctx context.Context, task string) (*Result, error) {
 			Messages:    msgs,
 			Temperature: a.cfg.Temperature,
 			MaxTokens:   a.cfg.MaxTokens,
-			JSON:        true,
+			Tools:       specs,
 		})
+		res.Usage.PromptTokens += resp.Usage.PromptTokens
+		res.Usage.CompletionTokens += resp.Usage.CompletionTokens
+		if errors.Is(err, llm.ErrMalformedReply) {
+			obs := "invalid reply: " + strings.TrimPrefix(err.Error(), llm.ErrMalformedReply.Error()+": ")
+			res.Steps = append(res.Steps, Step{Index: i, Observation: obs})
+			msgs = append(msgs, llm.Message{Role: llm.RoleAssistant, Content: resp.Content}, userNote(obs))
+			continue
+		}
 		if err != nil {
 			return res, fmt.Errorf("agent: model call %d failed: %w", i, err)
 		}
-		res.Usage.PromptTokens += resp.Usage.PromptTokens
-		res.Usage.CompletionTokens += resp.Usage.CompletionTokens
-		msgs = append(msgs, llm.Message{Role: llm.RoleAssistant, Content: resp.Content})
 
-		reply, err := parseReply(resp.Content)
-		if err != nil {
-			obs := fmt.Sprintf("invalid reply: %v. Reply with exactly one JSON object.", err)
-			res.Steps = append(res.Steps, Step{Index: i, Observation: obs})
-			msgs = append(msgs, observation(obs))
-			continue
-		}
-		if reply.final != nil {
+		if len(resp.ToolCalls) == 0 {
+			if strings.TrimSpace(resp.Content) == "" {
+				obs := "invalid reply: empty answer. Call a tool or give a final answer."
+				res.Steps = append(res.Steps, Step{Index: i, Observation: obs})
+				msgs = append(msgs, llm.Message{Role: llm.RoleAssistant}, userNote(obs))
+				continue
+			}
 			res.Outcome = Finished
-			res.Final = *reply.final
+			res.Final = resp.Content
 			return res, nil
 		}
 
-		call := Call{Tool: reply.tool, Args: reply.args}
+		// One call per step. Extra calls in the same reply are dropped, which
+		// keeps every assistant tool call paired with exactly one result.
+		tc := resp.ToolCalls[0]
+		msgs = append(msgs, llm.Message{Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: []llm.ToolCall{tc}})
+		reply := func(obs string) {
+			msgs = append(msgs, llm.Message{Role: llm.RoleTool, ToolCallID: tc.ID, Content: obs})
+		}
+
+		call := Call{Tool: tc.Name, Args: tc.Args}
 		step := Step{Index: i, Call: &call}
 
 		tool, ok := a.tools[call.Tool]
 		if !ok {
 			step.Observation = fmt.Sprintf("unknown tool %q. Available tools: %s", call.Tool, strings.Join(a.toolNames(), ", "))
 			res.Steps = append(res.Steps, step)
-			msgs = append(msgs, observation(step.Observation))
+			reply(step.Observation)
 			continue
 		}
 		if err := tool.Schema().Validate(call.Args); err != nil {
 			step.Observation = fmt.Sprintf("invalid arguments for %s: %v", call.Tool, err)
 			res.Steps = append(res.Steps, step)
-			msgs = append(msgs, observation(step.Observation))
+			reply(step.Observation)
 			continue
 		}
 
@@ -167,15 +183,23 @@ func (a *Agent) Run(ctx context.Context, task string) (*Result, error) {
 			step.Observation = out
 		}
 		res.Steps = append(res.Steps, step)
-		msgs = append(msgs, observation(step.Observation))
+		reply(step.Observation)
 	}
 
 	res.Outcome = StepLimit
 	return res, nil
 }
 
-func observation(s string) llm.Message {
-	return llm.Message{Role: llm.RoleUser, Content: "Observation: " + s}
+func userNote(s string) llm.Message { return llm.Message{Role: llm.RoleUser, Content: s} }
+
+// specs describes the tools to the model, sorted so requests are repeatable.
+func (a *Agent) specs() []llm.ToolSpec {
+	specs := make([]llm.ToolSpec, 0, len(a.tools))
+	for _, name := range a.toolNames() {
+		t := a.tools[name]
+		specs = append(specs, llm.ToolSpec{Name: name, Description: t.Description(), Parameters: t.Schema().JSONSchema()})
+	}
+	return specs
 }
 
 func (a *Agent) toolNames() []string {
@@ -187,62 +211,7 @@ func (a *Agent) toolNames() []string {
 	return names
 }
 
-func (a *Agent) systemPrompt() string {
-	var b strings.Builder
-	b.WriteString("You are an agent that completes a task by calling tools.\n")
-	b.WriteString("Reply with exactly one JSON object and nothing else.\n")
-	b.WriteString(`To call a tool: {"tool": "<name>", "args": {...}}` + "\n")
-	b.WriteString(`To finish: {"final": "<your answer>"}` + "\n")
-	b.WriteString("After each tool call you will get an Observation. Use it to decide the next step.\n\nTools:\n")
-	for _, name := range a.toolNames() {
-		t := a.tools[name]
-		fmt.Fprintf(&b, "- %s: %s\n", name, t.Description())
-		props := t.Schema().Properties
-		keys := make([]string, 0, len(props))
-		for k := range props {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(&b, "    %s (%s): %s\n", k, props[k].Type, props[k].Description)
-		}
-	}
-	return b.String()
-}
-
-type reply struct {
-	tool  string
-	args  map[string]any
-	final *string
-}
-
-// parseReply reads the first JSON object in the model's answer. Models often
-// wrap JSON in code fences or add a sentence around it, so the parser looks
-// for the first '{' instead of demanding a clean string.
-func parseReply(content string) (reply, error) {
-	start := strings.Index(content, "{")
-	if start < 0 {
-		return reply{}, errors.New("no JSON object found")
-	}
-	var raw struct {
-		Tool  string         `json:"tool"`
-		Args  map[string]any `json:"args"`
-		Final *string        `json:"final"`
-	}
-	if err := json.NewDecoder(strings.NewReader(content[start:])).Decode(&raw); err != nil {
-		return reply{}, fmt.Errorf("malformed JSON: %v", err)
-	}
-	switch {
-	case raw.Tool != "" && raw.Final != nil:
-		return reply{}, errors.New(`got both "tool" and "final"`)
-	case raw.Final != nil:
-		return reply{final: raw.Final}, nil
-	case raw.Tool != "":
-		if raw.Args == nil {
-			raw.Args = map[string]any{}
-		}
-		return reply{tool: raw.Tool, args: raw.Args}, nil
-	default:
-		return reply{}, errors.New(`need either "tool" or "final"`)
-	}
-}
+// systemPrompt is the same for every model. The adapter adds whatever its
+// protocol needs on top (the JSON format for prompt based tool calling).
+const systemPrompt = "You are an agent that completes a task by calling tools. " +
+	"Use the tools to get facts, do not guess them. When you have what you need, give a short final answer."

@@ -37,7 +37,7 @@ func (s *spyTool) Run(context.Context, map[string]any) (string, error) {
 
 func newAgent(t *testing.T, p llm.Provider, d agent.Decider, tl ...agent.Tool) *agent.Agent {
 	t.Helper()
-	a, err := agent.New(p, tl, d, agent.Config{MaxSteps: 5})
+	a, err := agent.New(llm.NewPromptTools(p), tl, d, agent.Config{MaxSteps: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestBadRepliesAreObservationsThenTheModelRecovers(t *testing.T) {
 		`{"tool":"x","final":"y"}`,    // both
 	}
 	m := llm.NewMock(append(bad, `{"final":"ok"}`)...)
-	a, _ := agent.New(m, nil, agent.AlwaysAct{}, agent.Config{MaxSteps: 6})
+	a, _ := agent.New(llm.NewPromptTools(m), nil, agent.AlwaysAct{}, agent.Config{MaxSteps: 6})
 
 	res, err := a.Run(context.Background(), "go")
 	if err != nil || res.Outcome != agent.Finished {
@@ -326,4 +326,78 @@ func TestSystemPromptListsToolsAndFormat(t *testing.T) {
 			t.Fatalf("system prompt is missing %q:\n%s", want, sys.Content)
 		}
 	}
+}
+
+func TestNativeToolCallsAreAnsweredWithMatchingToolMessages(t *testing.T) {
+	spy := &spyTool{name: "spy"}
+	m := llm.NewMockResponses(
+		llm.Response{ToolCalls: []llm.ToolCall{
+			{ID: "a", Name: "spy", Args: map[string]any{"n": float64(1)}},
+			{ID: "b", Name: "spy", Args: map[string]any{"n": float64(2)}}, // dropped, one call per step
+		}},
+		llm.Response{Content: "done"},
+	)
+	a := newAgentNative(t, m, spy)
+
+	res, err := a.Run(context.Background(), "go")
+	if err != nil || res.Outcome != agent.Finished || res.Final != "done" {
+		t.Fatalf("outcome %q final %q err %v", res.Outcome, res.Final, err)
+	}
+	if spy.runs.Load() != 1 {
+		t.Fatalf("only the first call may run, ran %d", spy.runs.Load())
+	}
+	msgs := m.Requests()[1].Messages
+	asst, tool := msgs[len(msgs)-2], msgs[len(msgs)-1]
+	if len(asst.ToolCalls) != 1 || asst.ToolCalls[0].ID != "a" {
+		t.Fatalf("assistant message must keep exactly the call that ran: %+v", asst)
+	}
+	if tool.Role != llm.RoleTool || tool.ToolCallID != "a" || tool.Content != "ok" {
+		t.Fatalf("tool result must answer call a: %+v", tool)
+	}
+}
+
+func TestNativeRequestCarriesToolSpecs(t *testing.T) {
+	m := llm.NewMockResponses(llm.Response{Content: "x"})
+	a := newAgentNative(t, m, tools.All()...)
+	if _, err := a.Run(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	specs := m.Requests()[0].Tools
+	if len(specs) != 3 || specs[0].Name != "check_repetition" || specs[2].Name != "get_policy" {
+		t.Fatalf("want 3 specs sorted by name, got %+v", specs)
+	}
+	if !strings.Contains(string(specs[2].Parameters), `"duration_minutes"`) || !strings.Contains(string(specs[2].Parameters), `"integer"`) {
+		t.Fatalf("schema not rendered: %s", specs[2].Parameters)
+	}
+}
+
+func TestNativeEmptyAnswerIsAnObservationNotASuccess(t *testing.T) {
+	m := llm.NewMockResponses(llm.Response{}, llm.Response{Content: "ok"})
+	a := newAgentNative(t, m)
+	res, err := a.Run(context.Background(), "go")
+	if err != nil || res.Outcome != agent.Finished || len(res.Steps) != 1 || !strings.HasPrefix(res.Steps[0].Observation, "invalid reply") {
+		t.Fatalf("res %+v err %v", res, err)
+	}
+}
+
+func TestMalformedReplyStillCountsItsTokens(t *testing.T) {
+	m := llm.NewMock("not json", `{"final":"ok"}`)
+	a := newAgent(t, m, agent.AlwaysAct{})
+	res, err := a.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two model calls happened, so both must be in the usage.
+	if res.Usage.CompletionTokens < 2 {
+		t.Fatalf("usage of the malformed call was lost: %+v", res.Usage)
+	}
+}
+
+func newAgentNative(t *testing.T, p llm.Provider, tl ...agent.Tool) *agent.Agent {
+	t.Helper()
+	a, err := agent.New(p, tl, agent.AlwaysAct{}, agent.Config{MaxSteps: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
 }
