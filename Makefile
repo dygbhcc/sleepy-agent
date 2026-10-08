@@ -1,4 +1,4 @@
-.PHONY: test lint demo
+.PHONY: test lint demo skeleton
 
 test:
 	go test -race ./...
@@ -9,3 +9,6 @@ lint:
 
 demo:
 	go run ./cmd/demo
+
+skeleton:
+	go run ./cmd/skeleton

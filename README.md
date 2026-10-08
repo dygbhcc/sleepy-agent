@@ -11,36 +11,47 @@ running example is an automated episode pipeline: a topic goes in, an
 episode (title, script, later narration and video) comes out, with quality
 gates, self-healing and human approval where it matters.
 
-> Status: **Day 3 of 10.** The agent loop, tools, a `Decider` and a Groq
-> provider exist. The episode pipeline is still the naive Day 2 version; the
-> real state machine is ported from Sleepy on Day 4.
+> Status: **Day 4 of 10.** The state machine and worker loop are ported from
+> Sleepy, and a walking skeleton runs a mock episode end to end. Publishing
+> waits for a human. The script step still uses the naive Day 2 generator, QA
+> gates are ported on Day 5.
 
 ## Run it
 
 Needs Go 1.23 or newer. No API key, no network.
 
 ```bash
-make demo   # the agent loop; scripted mock, or a real model if GROQ_API_KEY is set
-make test   # tests with the race detector
-make lint   # gofmt and go vet
+make skeleton # one mock episode through the state machine, publish waits for approval
+make demo     # the agent loop; scripted mock, or a real model if GROQ_API_KEY and GROQ_MODEL are set
+make test     # tests with the race detector
+make lint     # gofmt and go vet
 ```
 
-## Where this is going
+## How a run moves
+
+One worker iteration claims a run, does exactly one step, and releases it. The
+status is the only memory, so a crashed run resumes from the step it was on
+(tested by reopening the state file with brand new objects).
 
 ```mermaid
 flowchart LR
-    A[PENDING] --> B[SCRIPTED]
-    B --> C[VOICED]
-    C --> D[RENDERED]
-    D --> E[DONE]
-    B -. QA gate .-> F{pass?}
-    F -- no --> G[FixEngine]
-    G --> H[LLM reasoner<br/>shadow mode first]
-    G --> B
-    C -. approval gate .-> I[human]
+    A[PENDING] -->|script| B[SCRIPTED]
+    B -->|voice| C[VOICED]
+    C -->|thumbnail| D[THUMBNAILED]
+    D -->|render| E[RENDERED]
+    E -->|package| F[PACKAGED]
+    F -->|check| G[UPLOADED]
+    G -->|publish| H[DONE]
+    G -. Decider: ask .-> I((human approval))
+    I --> G
+    A & B & C & D & E & F & G -. permanent error .-> X[FAILED]
+    A & B & C & D & E & F & G -. repeated transient error, or Decider stop .-> R[NEEDS_REVIEW]
 ```
 
-Design rules the code will follow:
+Not built yet, but where it goes: QA gates after each step (Day 5), a fix
+engine for failed gates (Day 6 and 7), budgets and autonomy levels (Day 8).
+
+Design rules the code follows:
 
 - **One seam to the model.** Everything talks to `llm.Provider`. The mock,
   Groq and OpenAI are interchangeable, and tests never need a network.
@@ -48,8 +59,8 @@ Design rules the code will follow:
   prompts. The LLM only handles judgment calls that cannot be coded.
 - **Earn autonomy.** A new capability starts in shadow mode, where it only
   suggests. It gets control after the logs show it deserves it.
-- **Act, ask, stop.** Every step has an explicit rule for when the agent
-  proceeds, asks a human, or halts.
+- **Act, ask, stop.** Before every step the worker asks an `agent.Decider`.
+  There is no implicit permission, and an unknown answer means stop.
 - **Publish safely.** `Voice`, `Renderer` and `Publisher` are interfaces with
   mocks. The publisher defaults to dry-run; a real upload is unlisted and needs
   approval. Nothing goes public without an explicit autonomy policy.
@@ -60,9 +71,9 @@ Design rules the code will follow:
 | --- | --- |
 | 1 to 2 | Launch, repo, provider seam, mock provider, first measured failure |
 | 3 | Agent loop, tools with validation, `Decider` (act, ask, stop), Groq provider |
-| 4 | State machine and worker loop ported from Sleepy; walking skeleton with mock adapters |
+| 4 | State machine, worker loop and a `Store` (memory or JSON file) ported from Sleepy; walking skeleton with mock adapters and a publish approval gate |
 | 5 | QA gates ported; first real LLM pipeline; the known gap tests flip to reject |
-| 6 | Idempotency and FixEngine; a `Store` interface (in memory or file first, Postgres optional later) |
+| 6 | Idempotency (input hashes) and FixEngine; Postgres behind `Store` only if needed |
 | 7 | Shadow-mode LLM reasoner and evals |
 | 8 | Approval gates, autonomy levels, guardrails (budget, attempts, allow-list) |
 | 9 | Real voice, render and YouTube adapters, first real upload as unlisted behind approval |
