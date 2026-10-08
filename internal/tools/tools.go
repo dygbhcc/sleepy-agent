@@ -56,7 +56,7 @@ func (CheckRepetition) Run(_ context.Context, args map[string]any) (string, erro
 		r.Sentences, r.UniqueSentences, r.UniqueRatio, r.TopWord, r.TopWordShare), nil
 }
 
-// RepetitionReport is the measurement behind check_repetition. Day 7 reuses it
+// RepetitionReport is the measurement behind check_repetition. Day 6 reuses it
 // for the QA gate.
 type RepetitionReport struct {
 	Sentences       int

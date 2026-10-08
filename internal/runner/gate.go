@@ -16,7 +16,7 @@ type RunGetter interface {
 //
 // Every step except publishing is allowed. Publishing needs a human's yes
 // recorded on the run. If the run cannot be read, the answer is stop: the gate
-// fails closed. The Day 8 policy grows from here (stale approvals, budgets,
+// fails closed. The Day 9 policy grows from here (stale approvals, budgets,
 // autonomy levels).
 type PublishGate struct {
 	Runs RunGetter

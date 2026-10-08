@@ -12,7 +12,7 @@ import (
 //
 // Sleepy's first real failures were scripts that were too short or that kept
 // repeating the same words, and they were only caught by reading the output.
-// The naive pipeline has no way to tell, so it accepts both. Day 7 adds QA
+// The naive pipeline has no way to tell, so it accepts both. Day 6 adds QA
 // gates, and these tests then flip to expect a rejection.
 
 // sleepyMinWords is Sleepy's minimum for a 5 minute episode (100 words per minute).

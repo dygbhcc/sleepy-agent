@@ -1,7 +1,8 @@
 // Package pipeline turns a topic into an episode by calling a Provider.
 //
 // Day 2 keeps this deliberately naive: two sequential calls, no state,
-// no retries. Day 5 replaces it with a real state machine. The point of
+// no retries. Day 4 moved orchestration into a state machine and Day 5
+// replaces this generator with the ported one. The point of
 // writing the naive version first is to feel exactly where it breaks.
 package pipeline
 

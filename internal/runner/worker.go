@@ -3,8 +3,8 @@
 // It is the Sleepy worker (internal/jobs/worker.go) reduced to its skeleton:
 // claim a run, process exactly ONE step, release it, loop. Because the status
 // is the only memory, a run that dies in the middle resumes from the step it
-// was on. What Sleepy bolts onto this loop arrives later: QA gates on Day 5,
-// the fix engine on Day 6 and 7, guardrails on Day 8.
+// was on. What Sleepy bolts onto this loop arrives later: QA gates on Day 6,
+// the fix engine on Day 7 and 8, guardrails on Day 9.
 //
 // New in this repo: before every step the worker asks an agent.Decider whether
 // it may go ahead. That is where the human approval gate lives.
@@ -55,7 +55,7 @@ type Steps struct {
 	Publisher Publisher
 }
 
-// Event describes one thing the worker did. It is the seed of the Day 8 trace log.
+// Event describes one thing the worker did. It is the seed of the Day 9 trace log.
 type Event struct {
 	RunID    string
 	Stage    string
@@ -155,7 +155,7 @@ func buildStages(s Steps) map[domain.RunStatus]stage {
 			ref, err := s.Renderer.Package(ctx, r.Outputs[domain.OutputVideo])
 			return map[string]string{domain.OutputPackage: ref}, err
 		}},
-		// In Sleepy this status runs the package QA gate. Until Day 5 it passes through.
+		// In Sleepy this status runs the package QA gate. Until Day 6 it passes through.
 		domain.StatusPackaged: {"check", func(context.Context, domain.Run) (map[string]string, error) {
 			return nil, nil
 		}},

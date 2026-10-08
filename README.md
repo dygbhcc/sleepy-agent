@@ -11,10 +11,10 @@ running example is an automated episode pipeline: a topic goes in, an
 episode (title, script, later narration and video) comes out, with quality
 gates, self-healing and human approval where it matters.
 
-> Status: **Day 4 of 10.** The state machine and worker loop are ported from
+> Status: **Day 4 of 11.** The state machine and worker loop are ported from
 > Sleepy, and a walking skeleton runs a mock episode end to end. Publishing
 > waits for a human. The script step still uses the naive Day 2 generator, QA
-> gates are ported on Day 5.
+> gates are ported on Day 6.
 
 ## Run it
 
@@ -48,8 +48,8 @@ flowchart LR
     A & B & C & D & E & F & G -. repeated transient error, or Decider stop .-> R[NEEDS_REVIEW]
 ```
 
-Not built yet, but where it goes: QA gates after each step (Day 5), a fix
-engine for failed gates (Day 6 and 7), budgets and autonomy levels (Day 8).
+Not built yet, but where it goes: QA gates after each step (Day 6), a fix
+engine for failed gates (Day 7 and 8), budgets and autonomy levels (Day 9).
 
 Design rules the code follows:
 
@@ -72,12 +72,13 @@ Design rules the code follows:
 | 1 to 2 | Launch, repo, provider seam, mock provider, first measured failure |
 | 3 | Agent loop, tools with validation, `Decider` (act, ask, stop), Groq provider |
 | 4 | State machine, worker loop and a `Store` (memory or JSON file) ported from Sleepy; walking skeleton with mock adapters and a publish approval gate |
-| 5 | QA gates ported; first real LLM pipeline; the known gap tests flip to reject |
-| 6 | Idempotency (input hashes) and FixEngine; Postgres behind `Store` only if needed |
-| 7 | Shadow-mode LLM reasoner and evals |
-| 8 | Approval gates, autonomy levels, guardrails (budget, attempts, allow-list) |
-| 9 | Real voice, render and YouTube adapters, first real upload as unlisted behind approval |
-| 10 | Launch: CI, Docker compose, one-command demo, walkthrough |
+| 5 | Real script generation: Sleepy's script generator ported, the script step runs on a real LLM; first measured raw failure rate, with no QA yet |
+| 6 | QA gates ported; the known gap tests flip to reject |
+| 7 | Idempotency (input hashes) and FixEngine; Postgres behind `Store` only if needed |
+| 8 | Shadow-mode LLM reasoner and evals |
+| 9 | Approval gates, autonomy levels, guardrails (budget, attempts, allow-list) |
+| 10 | Real voice, render and YouTube adapters, first real upload as unlisted behind approval |
+| 11 | Launch: CI, Docker compose, one-command demo, walkthrough |
 
 Every day's failures are written down in [FAILURE_LOG.md](FAILURE_LOG.md).
 

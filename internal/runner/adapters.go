@@ -9,7 +9,7 @@ import (
 
 // Every external capability is an interface. Mocks live in this repo and tests
 // never touch the network or a paid API. Real adapters are ported from Sleepy
-// on Day 9, after QA gates (Day 5) and guardrails (Day 8) exist.
+// on Day 10, after QA gates (Day 6) and guardrails (Day 9) exist.
 
 // Script is what the script step produces.
 type Script struct {
@@ -64,7 +64,7 @@ func (DryRunPublisher) Publish(_ context.Context, req PublishRequest) (PublishRe
 }
 
 // LLMScripter writes scripts with an llm.Provider, using the naive Day 2
-// pipeline. Day 5 replaces it with the ported script generator and QA gates.
+// pipeline. Day 5 replaces it with the ported script generator, Day 6 adds QA gates.
 type LLMScripter struct {
 	Provider llm.Provider
 }

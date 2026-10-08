@@ -32,7 +32,7 @@ type Request struct {
 	JSON bool
 }
 
-// Usage is the token accounting for one call. Cost guardrails (Day 13)
+// Usage is the token accounting for one call. Cost guardrails (Day 9)
 // are built on top of this.
 type Usage struct {
 	PromptTokens     int
