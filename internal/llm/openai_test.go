@@ -215,6 +215,21 @@ func TestOpenAICompatUnreadableToolArgumentsAreMalformedNotFatal(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatReportsFinishReasonAndReasoningTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":""},"finish_reason":"length"}],` +
+			`"usage":{"prompt_tokens":90,"completion_tokens":1500,"completion_tokens_details":{"reasoning_tokens":1500}}}`))
+	}))
+	defer srv.Close()
+	resp, err := newTestProvider(srv).Complete(context.Background(), Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FinishReason != "length" || resp.ReasoningTokens != 1500 || resp.Usage.CompletionTokens != 1500 {
+		t.Fatalf("unexpected response %+v", resp)
+	}
+}
+
 func TestOpenAICompatToolCallWithNoArgumentsGetsAnEmptyMap(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[` +

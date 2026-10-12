@@ -134,7 +134,8 @@ func (g *Generator) Generate(ctx context.Context, topic string) (Result, error) 
 		}
 		text := cleanChunkOutput(resp.Content)
 		if text == "" {
-			return res, fmt.Errorf("script: chunk %d of %d: the model returned no script text (raw %d bytes)", i+1, numChunks, len(resp.Content))
+			return res, fmt.Errorf("script: chunk %d of %d: the model returned no script text (raw %d bytes, finish_reason %q, %d completion tokens of which %d reasoning, max_tokens %d)",
+				i+1, numChunks, len(resp.Content), resp.FinishReason, resp.Usage.CompletionTokens, resp.ReasoningTokens, g.cfg.MaxTokensPerChunk)
 		}
 		res.Chunks++
 		parts = append(parts, text)

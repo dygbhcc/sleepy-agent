@@ -126,6 +126,20 @@ func TestEmptyChunkFailsButKeepsUsage(t *testing.T) {
 	}
 }
 
+func TestEmptyChunkErrorSaysWhyTheModelStopped(t *testing.T) {
+	m := llm.NewMockResponses(llm.Response{Content: "", FinishReason: "length", ReasoningTokens: 1500,
+		Usage: llm.Usage{PromptTokens: 90, CompletionTokens: 1500}})
+	_, err := gen(t, m, Config{MaxTokensPerChunk: 1500}).Generate(context.Background(), "x")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	for _, want := range []string{`finish_reason "length"`, "1500 completion tokens", "1500 reasoning", "max_tokens 1500"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should contain %q: %v", want, err)
+		}
+	}
+}
+
 func TestProviderErrorIsWrappedAndUsageSoFarKept(t *testing.T) {
 	m := llm.NewMock(cleanScript(12))
 	boom := errors.New("down")

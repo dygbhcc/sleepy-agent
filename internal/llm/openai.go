@@ -92,11 +92,15 @@ type wireToolCall struct {
 
 type chatResponse struct {
 	Choices []struct {
-		Message chatMessage `json:"message"`
+		Message      chatMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens            int `json:"prompt_tokens"`
+		CompletionTokens        int `json:"completion_tokens"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
@@ -178,6 +182,8 @@ func (p *OpenAICompat) Complete(ctx context.Context, req Request) (Response, err
 			PromptTokens:     parsed.Usage.PromptTokens,
 			CompletionTokens: parsed.Usage.CompletionTokens,
 		},
+		FinishReason:    parsed.Choices[0].FinishReason,
+		ReasoningTokens: parsed.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 	for _, c := range msg.ToolCalls {
 		args := map[string]any{}

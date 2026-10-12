@@ -82,6 +82,12 @@ type Response struct {
 	Content   string
 	ToolCalls []ToolCall
 	Usage     Usage
+	// FinishReason is why the model stopped ("stop", "length", ...), when the
+	// provider says. It is diagnostic only: empty answers are explained with it.
+	FinishReason string
+	// ReasoningTokens is how many completion tokens went into hidden reasoning,
+	// when the provider reports it. Part of Usage.CompletionTokens, not extra.
+	ReasoningTokens int
 }
 
 // Provider is the only interface the rest of the system depends on.
