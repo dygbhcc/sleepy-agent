@@ -14,7 +14,7 @@ These rules apply to every contributor and every AI assistant working in this re
 
 - `internal/agent`: agent loop, tools, `Decider`. `internal/llm`: `Provider`, mock, Groq client, and the two tool calling adapters (native in `OpenAICompat`, `PromptTools` for the rest). The agent only sees `llm.ToolCall`, never a model specific format.
 - `internal/domain`, `internal/runner`, `internal/store`: the run state machine, worker loop and storage.
-- `internal/pipeline`: the naive Day 2 generator, temporary. `cmd/`: demos.
+- `internal/script`: script generator ported from Sleepy plus `Measure`. `internal/pipeline`: the naive Day 2 generator, only kept for the known gap tests until Day 6. `cmd/`: demos.
 
 ## Conventions
 

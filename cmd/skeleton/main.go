@@ -30,7 +30,7 @@ func main() {
 
 func run(ctx context.Context, topic string) error {
 	st := store.NewMemory(nil)
-	script := llm.NewMock("The Quiet Forest", "The forest is slow and warm. Breathe in. Breathe out.")
+	script := llm.NewMock("The forest is slow and warm. Breathe in. Breathe out.", "The Quiet Forest")
 
 	w, err := runner.New(st, runner.Steps{
 		Scripter:  runner.LLMScripter{Provider: script},

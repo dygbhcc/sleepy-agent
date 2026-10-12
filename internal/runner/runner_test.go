@@ -37,7 +37,7 @@ func newRig(t *testing.T, st *store.File, decider agent.Decider) *rig {
 		voice:     &runner.MockVoice{},
 		renderer:  &runner.MockRenderer{},
 		publisher: &runner.MockPublisher{},
-		script:    llm.NewMock("A Quiet Forest", "The forest is slow and warm. Breathe in. Breathe out."),
+		script:    llm.NewMock("The forest is slow and warm. Breathe in. Breathe out.", "A Quiet Forest"),
 	}
 	if decider == nil {
 		decider = runner.PublishGate{Runs: st}
@@ -481,5 +481,16 @@ func TestDrainStopsWhenTheStoreKeepsHandingBackTheSameRun(t *testing.T) {
 	st.CreateRun(ctx, "t")
 	if err := w.Drain(ctx); err == nil {
 		t.Fatal("Drain should return an error instead of looping forever")
+	}
+}
+
+func TestLLMScripterReturnsTheScriptAsBodyAndTheNameAsTitle(t *testing.T) {
+	m := llm.NewMock("A calm body of text.", "Velvet Meadow")
+	got, err := runner.LLMScripter{Provider: m}.Script(context.Background(), "a quiet meadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Body != "A calm body of text." || got.Title != "Velvet Meadow" {
+		t.Fatalf("got %+v", got)
 	}
 }

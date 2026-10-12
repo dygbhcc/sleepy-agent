@@ -1,4 +1,4 @@
-.PHONY: test lint demo skeleton compare
+.PHONY: test lint demo skeleton compare script
 
 test:
 	go test -race ./...
@@ -15,3 +15,6 @@ skeleton:
 
 compare:
 	go run ./cmd/compare
+
+script:
+	go run ./cmd/scriptstats

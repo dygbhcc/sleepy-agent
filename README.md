@@ -11,7 +11,7 @@ running example is an automated episode pipeline: a topic goes in, an
 episode (title, script, later narration and video) comes out, with quality
 gates, self-healing and human approval where it matters.
 
-> Status: **Day 4 of 11.** The state machine and worker loop are ported from
+> Status: **Day 5 of 11.** The state machine and worker loop are ported from
 > Sleepy, and a walking skeleton runs a mock episode end to end. Publishing
 > waits for a human. The script step still uses the naive Day 2 generator, QA
 > gates are ported on Day 6.
@@ -23,6 +23,7 @@ Needs Go 1.23 or newer. No API key, no network.
 ```bash
 make skeleton # one mock episode through the state machine, publish waits for approval
 make demo     # the agent loop; scripted mock, or a real model if GROQ_API_KEY and GROQ_MODEL are set
+make script   # Day 5: generate scripts with the ported generator and measure the raw failure rate (needs GROQ_API_KEY and GROQ_MODEL for a real result)
 make compare  # native vs prompt based tool calling, N runs each (needs GROQ_API_KEY and GROQ_MODEL for a real result)
 make test     # tests with the race detector
 make lint     # gofmt and go vet
@@ -77,14 +78,16 @@ Design rules the code follows:
 | `internal/runner` | Worker loop, approval gate, adapter interfaces and mocks | ported, reduced |
 | `internal/store` | Run storage: memory or JSON file | new (Sleepy uses Postgres) |
 | `internal/policy`, `internal/errs` | Duration limits, transient error type | ported |
-| `internal/pipeline` | Naive Day 2 script generator, replaced on Day 5 | new, temporary |
+| `internal/pipeline` | Naive Day 2 generator, no longer used by the worker; kept only for the known gap tests that flip on Day 6 | new, temporary |
+| `internal/script` | Script generator ported from Sleepy (chunked, same prompts) and `Measure`, which counts broken rules without judging | ported |
 | `internal/scenario` | The one task `demo` and `compare` share, so both measure the same thing | new |
-| `cmd/demo`, `cmd/skeleton`, `cmd/compare` | The agent loop demo, the walking skeleton, the adapter comparison | new |
+| `cmd/demo`, `cmd/skeleton`, `cmd/compare`, `cmd/scriptstats` | The agent loop demo, the walking skeleton, the adapter comparison, the script failure rate | new |
 
 ## Known limits (measured, see FAILURE_LOG.md)
 
-- The script step is the naive Day 2 generator and the mock always returns the
-  same text. Nothing checks quality yet, QA gates arrive on Day 6.
+- The script step uses the generator ported from Sleepy, but nothing checks its
+  output yet, QA gates arrive on Day 6. The raw failure rate is measured with
+  `make script`; no real model has been measured yet.
 - Tool calling is model specific, measured with `make compare` (5 runs per
   mode, one task, so not a reliability claim). `gpt-oss-20b` and `gpt-oss-120b`:
   native 5/5, prompt based 0/5 (HTTP 400 on Groq). `qwen/qwen3.8-27b`: 5/5 in

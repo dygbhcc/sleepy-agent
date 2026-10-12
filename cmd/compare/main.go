@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"sleepy-agent/internal/agent"
-	"sleepy-agent/internal/errs"
 	"sleepy-agent/internal/llm"
 	"sleepy-agent/internal/scenario"
 	"sleepy-agent/internal/tools"
@@ -143,7 +142,7 @@ func source() (string, func(mode string, retries *int) (llm.Provider, error)) {
 		os.Exit(2)
 	}
 	return "groq:" + model, func(mode string, retries *int) (llm.Provider, error) {
-		return scenario.Adapt(mode, &retrying{inner: llm.NewGroq(key, model), count: retries})
+		return scenario.Adapt(mode, retrying(llm.NewGroq(key, model), retries))
 	}
 }
 
@@ -156,9 +155,6 @@ func oneLine(s string) string {
 }
 
 const maxRetries = 3
-
-// backoff is a variable so tests do not sleep for real.
-var backoff = func(attempt int) time.Duration { return time.Duration(20*(attempt+1)) * time.Second }
 
 // pause is the wait between runs, so a burst of runs does not trip the rate
 // limit by itself. COMPARE_PAUSE_SECONDS overrides it, 0 disables it.
@@ -174,29 +170,15 @@ func pause() time.Duration {
 	return 15 * time.Second
 }
 
-// retrying waits out transient errors (a 429 rate limit is not a model
-// failure) and counts every retry, so the table says how often it happened.
-// A provider that stays unavailable still ends as an API error.
-type retrying struct {
-	inner llm.Provider
-	count *int
-}
-
-func (r *retrying) Name() string { return r.inner.Name() }
-
-func (r *retrying) Complete(ctx context.Context, req llm.Request) (llm.Response, error) {
-	for attempt := 0; ; attempt++ {
-		resp, err := r.inner.Complete(ctx, req)
-		if err == nil || !errs.IsTransient(err) || attempt >= maxRetries {
-			return resp, err
-		}
-		*r.count++
-		wait := backoff(attempt)
-		fmt.Fprintf(os.Stderr, "  rate limited or unavailable, waiting %s (retry %d of %d)\n", wait, attempt+1, maxRetries)
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-			return llm.Response{}, ctx.Err()
-		}
+// retrying wraps p so rate limits are waited out and every retry is counted
+// in the results table.
+func retrying(p llm.Provider, count *int) llm.Provider {
+	return &llm.Retrying{
+		Inner: p,
+		Max:   maxRetries,
+		OnRetry: func(attempt int, wait time.Duration, _ error) {
+			*count++
+			fmt.Fprintf(os.Stderr, "  rate limited or unavailable, waiting %s (retry %d of %d)\n", wait, attempt, maxRetries)
+		},
 	}
 }

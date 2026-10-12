@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"sleepy-agent/internal/llm"
-	"sleepy-agent/internal/pipeline"
+	"sleepy-agent/internal/script"
 )
 
 // Every external capability is an interface. Mocks live in this repo and tests
@@ -63,17 +63,22 @@ func (DryRunPublisher) Publish(_ context.Context, req PublishRequest) (PublishRe
 	return PublishResult{ID: "dry-run:" + req.RunID, Visibility: "dry-run"}, nil
 }
 
-// LLMScripter writes scripts with an llm.Provider, using the naive Day 2
-// pipeline. Day 5 replaces it with the ported script generator, Day 6 adds QA gates.
+// LLMScripter writes scripts with an llm.Provider, using the generator ported
+// from Sleepy (internal/script). Day 6 adds QA gates after it.
 type LLMScripter struct {
 	Provider llm.Provider
+	Config   script.Config // zero value: 5 minute Earthside episode in English
 }
 
 // Script implements Scripter.
 func (s LLMScripter) Script(ctx context.Context, topic string) (Script, error) {
-	ep, err := pipeline.Run(ctx, s.Provider, topic)
+	g, err := script.New(s.Provider, s.Config)
 	if err != nil {
 		return Script{}, err
 	}
-	return Script{Title: ep.Title, Body: ep.Script}, nil
+	res, err := g.Generate(ctx, topic)
+	if err != nil {
+		return Script{}, err
+	}
+	return Script{Title: res.Title, Body: res.Body}, nil
 }
