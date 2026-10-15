@@ -49,4 +49,7 @@ const (
 	OutputVideo     = "video"
 	OutputPackage   = "package"
 	OutputPublished = "published"
+	// OutputQAScript is the JSON report of the script gate, kept for passes and
+	// for rejections alike.
+	OutputQAScript = "qa_script"
 )

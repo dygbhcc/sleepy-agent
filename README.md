@@ -11,19 +11,20 @@ running example is an automated episode pipeline: a topic goes in, an
 episode (title, script, later narration and video) comes out, with quality
 gates, self-healing and human approval where it matters.
 
-> Status: **Day 5 of 11.** The state machine and worker loop are ported from
-> Sleepy, and a walking skeleton runs a mock episode end to end. Publishing
-> waits for a human. The script step still uses the naive Day 2 generator, QA
-> gates are ported on Day 6.
+> Status: **Day 6 of 11.** The state machine and worker loop are ported from
+> Sleepy, and a walking skeleton runs a mock episode end to end. Scripts come
+> from the ported Sleepy generator and pass a QA gate before the run may
+> advance: a rejected script is retried, then parked for a human. Publishing
+> waits for a human.
 
 ## Run it
 
 Needs Go 1.23 or newer. No API key, no network.
 
 ```bash
-make skeleton # one mock episode through the state machine, publish waits for approval
+make skeleton # one mock episode through the state machine: the QA gate rejects a short script once, publish waits for approval
 make demo     # the agent loop; scripted mock, or a real model if GROQ_API_KEY and GROQ_MODEL are set
-make script   # Day 5: generate scripts with the ported generator and measure the raw failure rate (needs GROQ_API_KEY and GROQ_MODEL for a real result)
+make script   # generate scripts with the ported generator, measure the raw failure rate and what the QA gate would say (needs GROQ_API_KEY and GROQ_MODEL for a real result)
 make compare  # native vs prompt based tool calling, N runs each (needs GROQ_API_KEY and GROQ_MODEL for a real result)
 make test     # tests with the race detector
 make lint     # gofmt and go vet
@@ -37,21 +38,23 @@ status is the only memory, so a crashed run resumes from the step it was on
 
 ```mermaid
 flowchart LR
-    A[PENDING] -->|script| B[SCRIPTED]
+    A[PENDING] -->|script, QA gate| B[SCRIPTED]
     B -->|voice| C[VOICED]
     C -->|thumbnail| D[THUMBNAILED]
     D -->|render| E[RENDERED]
     E -->|package| F[PACKAGED]
     F -->|check| G[UPLOADED]
     G -->|publish| H[DONE]
+    A -. QA rejected: same step again .-> A
     G -. Decider: ask .-> I((human approval))
     I --> G
     A & B & C & D & E & F & G -. permanent error .-> X[FAILED]
-    A & B & C & D & E & F & G -. repeated transient error, or Decider stop .-> R[NEEDS_REVIEW]
+    A & B & C & D & E & F & G -. repeated transient error, QA rejected 3 times, or Decider stop .-> R[NEEDS_REVIEW]
 ```
 
-Not built yet, but where it goes: QA gates after each step (Day 6), a fix
-engine for failed gates (Day 7 and 8), budgets and autonomy levels (Day 9).
+Not built yet, but where it goes: a fix engine that tells the model why it was
+rejected (Day 7), QA gates for voice, render and package once those adapters
+are real (Day 10), budgets and autonomy levels (Day 9).
 
 Design rules the code follows:
 
@@ -75,19 +78,42 @@ Design rules the code follows:
 | `internal/llm` | `Provider` seam, mock, OpenAI compatible client (Groq) with native tool calling, `PromptTools` adapter for models without it | new |
 | `internal/tools` | Tools the agent can call: policy, word count, repetition | new |
 | `internal/domain` | Run model and the status chain | ported |
-| `internal/runner` | Worker loop, approval gate, adapter interfaces and mocks | ported, reduced |
+| `internal/runner` | Worker loop, QA gate and approval gate, adapter interfaces and mocks | ported, reduced |
+| `internal/qa` | The script QA gate: word count, banned phrases, sleep safety, title. Says pass or fail and why, repairs nothing | ported |
 | `internal/store` | Run storage: memory or JSON file | new (Sleepy uses Postgres) |
 | `internal/policy`, `internal/errs` | Duration limits, transient error type | ported |
-| `internal/pipeline` | Naive Day 2 generator, no longer used by the worker; kept only for the known gap tests that flip on Day 6 | new, temporary |
-| `internal/script` | Script generator ported from Sleepy (chunked, same prompts) and `Measure`, which counts broken rules without judging | ported |
+| `internal/script` | Script generator ported from Sleepy (chunked, same prompts) and `Measure`, which counts broken prompt rules without judging | ported |
 | `internal/scenario` | The one task `demo` and `compare` share, so both measure the same thing | new |
 | `cmd/demo`, `cmd/skeleton`, `cmd/compare`, `cmd/scriptstats` | The agent loop demo, the walking skeleton, the adapter comparison, the script failure rate | new |
 
 ## Known limits (measured, see FAILURE_LOG.md)
 
-- The script step uses the generator ported from Sleepy, but nothing checks its
-  output yet, QA gates arrive on Day 6. The raw failure rate is measured with
-  `make script`; no real model has been measured yet.
+- The script step has a QA gate (`internal/qa`, Sleepy's thresholds). A rejected
+  script is run again as the same request, up to 3 failed attempts in a row
+  (rejections and errors share one counter), then the run is parked for a human.
+  The retry does not tell the model why it was rejected, that is the fix engine
+  on Day 7. Voice, render and package have no gate yet, they arrive with the
+  real adapters. `Measure` (the prompt's strict rules) and the gate
+  (production thresholds) are separate on purpose: a script can be clean for
+  `Measure` and still be rejected.
+- Raw script failure rate with no retry and no gate (`make script`, one prompt,
+  so not a general claim). `qwen/qwen3.8-27b`, Earthside, 5 minute episodes, 7
+  scripts: 0 of 7 clean. The structure held (4 sentences per paragraph, 12 to 14
+  paragraphs) but sentences were 5 to 7 words on average instead of 8 to 20, so
+  scripts had about 314 words against a 500 minimum; all 7 broke `too_short`
+  and `sentence_not_8_to_20_words`. `openai/gpt-oss-120b`: no script text in any
+  of the 3 runs; in the one run with diagnostics 1498 of 1500 completion tokens
+  were hidden reasoning. Not measured yet: whether a larger token budget or a
+  lower reasoning effort fixes gpt-oss, and why Qwen ignores only the sentence
+  length rule.
+- The gate on real output (`make script`, `qwen/qwen3.8-27b`, 3 scripts, one
+  attempt each): 1 of 3 accepted. Two were rejected `WORDCOUNT_LOW` (387 and 343
+  words), one of them also for the banned word "disappear". The accepted script
+  had 657 words, but 32 of its 84 sentences were under 8 words and one
+  sentence appeared twice; the gate checks neither (it holds Sleepy's
+  thresholds, not the prompt's rules). Length also varied between runs of the
+  same model (about 314 words on average over the first 7 scripts, 462 here),
+  so no single run gives a stable rate.
 - Tool calling is model specific, measured with `make compare` (5 runs per
   mode, one task, so not a reliability claim). `gpt-oss-20b` and `gpt-oss-120b`:
   native 5/5, prompt based 0/5 (HTTP 400 on Groq). `qwen/qwen3.8-27b`: 5/5 in
@@ -104,7 +130,7 @@ Design rules the code follows:
 | 3 | Agent loop, tools with validation, `Decider` (act, ask, stop), Groq provider |
 | 4 | State machine, worker loop and a `Store` (memory or JSON file) ported from Sleepy; walking skeleton with mock adapters and a publish approval gate |
 | 5 | Real script generation: Sleepy's script generator ported, the script step runs on a real LLM; first measured raw failure rate, with no QA yet |
-| 6 | QA gates ported; the known gap tests flip to reject |
+| 6 | Script QA gate ported (Sleepy's thresholds); a rejection is retried, then parked for review; the known gap tests flip to reject and the naive pipeline is removed |
 | 7 | Idempotency (input hashes) and FixEngine; Postgres behind `Store` only if needed |
 | 8 | Shadow-mode LLM reasoner and evals |
 | 9 | Approval gates, autonomy levels, guardrails (budget, attempts, allow-list) |

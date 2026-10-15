@@ -1,10 +1,11 @@
 // Command scriptstats measures how well a model follows Sleepy's script
-// rules when nothing checks its work.
+// rules when nothing fixes its work.
 //
 // It generates RUNS scripts (default 5) with the generator ported from Sleepy,
-// measures each one against the rules in the prompt, and prints the raw
-// failure rate. There is no QA gate and no retry on bad output: the numbers
-// are what the model does on its own. Day 6 adds the gates.
+// measures each one against the rules in the prompt (script.Measure, strict),
+// and also runs the production QA gate on it (qa.Script, Sleepy's thresholds).
+// There is no retry on bad output: the numbers are what the model does on its
+// own, so "gate pass" is the share of first attempts the pipeline would accept.
 //
 // Without GROQ_API_KEY it uses scripted mocks, which only proves the harness
 // works. With a key, GROQ_MODEL is required (there is no default model).
@@ -25,6 +26,7 @@ import (
 
 	"sleepy-agent/internal/llm"
 	"sleepy-agent/internal/policy"
+	"sleepy-agent/internal/qa"
 	"sleepy-agent/internal/script"
 )
 
@@ -41,6 +43,8 @@ var topics = []string{
 
 type summary struct {
 	runs, errors, generated, clean int
+	gatePass                       int
+	gateFails                      map[qa.FailType]int
 	titleFallbacks                 int
 	violations                     map[string]int
 	words, prompt, completion      int
@@ -61,7 +65,7 @@ func main() {
 	fmt.Printf("model: %s, style %s, %d minute episodes, %d runs\n", label, style, duration, runs)
 	fmt.Printf("pause between runs: %s\n\n", pause())
 
-	sum := summary{runs: runs, violations: map[string]int{}}
+	sum := summary{runs: runs, violations: map[string]int{}, gateFails: map[qa.FailType]int{}}
 	outDir := filepath.Join("out", "scriptstats")
 	_ = os.MkdirAll(outDir, 0o755)
 
@@ -98,6 +102,12 @@ func main() {
 		if rep.Clean() {
 			sum.clean++
 		}
+		gate := qa.Script(res.Title, res.Body, g.Policy())
+		if gate.Pass {
+			sum.gatePass++
+		} else {
+			sum.gateFails[gate.FailType]++
+		}
 		for _, v := range rep.Violations {
 			sum.violations[v]++
 		}
@@ -108,7 +118,11 @@ func main() {
 		if !rep.Clean() {
 			verdict = strings.Join(rep.Violations, ", ")
 		}
-		fmt.Printf("run %d  %-26s %q  %d words  %s\n", i, topic, res.Title, rep.Words, verdict)
+		gateVerdict := "gate pass"
+		if !gate.Pass {
+			gateVerdict = "gate REJECT " + gate.Summary()
+		}
+		fmt.Printf("run %d  %-26s %q  %d words  %s  |  %s\n", i, topic, res.Title, rep.Words, verdict, gateVerdict)
 		if len(rep.BannedFound) > 0 {
 			fmt.Printf("        banned words used: %s\n", strings.Join(rep.BannedFound, ", "))
 		}
@@ -119,8 +133,8 @@ func main() {
 
 func print(s summary, cfg script.Config) {
 	fmt.Println()
-	fmt.Println("| runs | generation errors | generated | clean | avg words | avg tokens (prompt+completion) | rate-limit retries |")
-	fmt.Println("|---|---|---|---|---|---|---|")
+	fmt.Println("| runs | generation errors | generated | clean | gate pass | avg words | avg tokens (prompt+completion) | rate-limit retries |")
+	fmt.Println("|---|---|---|---|---|---|---|---|")
 	avgWords, avgTokens := 0, 0
 	if s.generated > 0 {
 		avgWords = s.words / s.generated
@@ -128,7 +142,20 @@ func print(s summary, cfg script.Config) {
 	if s.runs > 0 {
 		avgTokens = (s.prompt + s.completion) / s.runs
 	}
-	fmt.Printf("| %d | %d | %d | %d/%d | %d | %d | %d |\n", s.runs, s.errors, s.generated, s.clean, s.generated, avgWords, avgTokens, s.retries)
+	fmt.Printf("| %d | %d | %d | %d/%d | %d/%d | %d | %d | %d |\n", s.runs, s.errors, s.generated, s.clean, s.generated, s.gatePass, s.generated, avgWords, avgTokens, s.retries)
+
+	if len(s.gateFails) > 0 {
+		fmt.Println("\n| gate rejected for (first reason) | scripts |")
+		fmt.Println("|---|---|")
+		reasons := make([]string, 0, len(s.gateFails))
+		for r := range s.gateFails {
+			reasons = append(reasons, string(r))
+		}
+		sort.Strings(reasons)
+		for _, r := range reasons {
+			fmt.Printf("| %s | %d/%d |\n", r, s.gateFails[qa.FailType(r)], s.generated)
+		}
+	}
 
 	if len(s.violations) > 0 {
 		fmt.Println("\n| broken rule | scripts |")
@@ -189,14 +216,7 @@ func source() (func(run int, retries *int) llm.Provider, string) {
 // mockFor plays a model for the keyless run: odd runs are clean, even runs
 // break a few rules, so the report shows what a failure looks like.
 func mockFor(run int, _ *int) llm.Provider {
-	paras := make([]string, 12)
-	for i := range paras {
-		s := func(j int) string {
-			return fmt.Sprintf("The slow river %d bends through the quiet meadow part %d tonight.", i, j)
-		}
-		paras[i] = strings.Join([]string{s(1), s(2), s(3), s(4)}, " ")
-	}
-	body := strings.Join(paras, "\n\n")
+	body := script.SampleScript(12)
 	if run%2 == 0 {
 		body = strings.Replace(body, "tonight.", "tonight!", 1)
 		body = strings.Replace(body, "quiet meadow", "meadow without any panic", 1)

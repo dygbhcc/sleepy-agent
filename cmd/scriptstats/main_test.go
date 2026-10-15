@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"sleepy-agent/internal/policy"
+	"sleepy-agent/internal/qa"
 	"sleepy-agent/internal/script"
 )
 
@@ -19,5 +20,14 @@ func TestMockRunsShowACleanAndABrokenScript(t *testing.T) {
 	broken, _ := g.Generate(context.Background(), "x")
 	if got := script.Measure(broken.Body, policy.ForDuration(5)).Violations; len(got) != 2 {
 		t.Fatalf("even runs must break two rules, got %v", got)
+	}
+	// The production gate agrees on both: a clean script passes it (so the
+	// sample is not repetitive enough to trip the repetition check), the broken
+	// one is stopped by its banned word.
+	if r := qa.Script(clean.Title, clean.Body, policy.ForDuration(5)); !r.Pass {
+		t.Fatalf("a clean script must pass the gate: %s", r.Summary())
+	}
+	if r := qa.Script(broken.Title, broken.Body, policy.ForDuration(5)); r.Pass || r.FailType != qa.FailBannedPhrase {
+		t.Fatalf("the broken script must be stopped by its banned word: %s", r.Summary())
 	}
 }

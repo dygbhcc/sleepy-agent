@@ -3,8 +3,9 @@
 // It is the Sleepy worker (internal/jobs/worker.go) reduced to its skeleton:
 // claim a run, process exactly ONE step, release it, loop. Because the status
 // is the only memory, a run that dies in the middle resumes from the step it
-// was on. What Sleepy bolts onto this loop arrives later: QA gates on Day 6,
-// the fix engine on Day 7 and 8, guardrails on Day 9.
+// was on. What Sleepy bolts onto this loop arrives later: the fix engine on
+// Day 7 and 8, guardrails on Day 9. Since Day 6 a step's output goes through a
+// QA gate before the run may advance.
 //
 // New in this repo: before every step the worker asks an agent.Decider whether
 // it may go ahead. That is where the human approval gate lives.
@@ -12,6 +13,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,6 +22,8 @@ import (
 	"sleepy-agent/internal/agent"
 	"sleepy-agent/internal/domain"
 	"sleepy-agent/internal/errs"
+	"sleepy-agent/internal/policy"
+	"sleepy-agent/internal/qa"
 )
 
 const toolPrefix = "stage."
@@ -71,6 +75,10 @@ type Config struct {
 	MaxAttempts int // consecutive transient failures before NEEDS_REVIEW; 0 = DefaultMaxAttempts
 	// MaxDrainSteps caps the steps one Drain call may take; 0 = DefaultMaxDrainSteps.
 	MaxDrainSteps int
+	// Policy is what the script gate holds scripts to. The zero value means a 5
+	// minute episode. It must describe the same episode length the Scripter
+	// writes, or the gate judges against the wrong word limits.
+	Policy policy.Policy
 	// Observer, if set, is called for every event. With several workers it is
 	// called from several goroutines, so it must be safe for concurrent use.
 	Observer func(Event)
@@ -82,11 +90,29 @@ type Worker struct {
 	decider agent.Decider
 	cfg     Config
 	stages  map[domain.RunStatus]stage
+	gates   map[domain.RunStatus]gate
 }
 
 type stage struct {
 	name string
 	run  func(ctx context.Context, r domain.Run) (map[string]string, error)
+}
+
+// gate judges what a step produced, before the run may advance. It never
+// repairs anything: a rejection is a failed attempt, counted like any other.
+type gate struct {
+	key   string // Run.Outputs key the JSON report is kept under
+	check func(outputs map[string]string) qa.Report
+}
+
+// buildGates maps a status to the gate that judges the step running in it.
+// Only the script step has one so far, the others arrive with real adapters.
+func buildGates(p policy.Policy) map[domain.RunStatus]gate {
+	return map[domain.RunStatus]gate{
+		domain.StatusPending: {key: domain.OutputQAScript, check: func(o map[string]string) qa.Report {
+			return qa.Script(o[domain.OutputTitle], o[domain.OutputScript], p)
+		}},
+	}
 }
 
 // New returns a Worker. The decider is mandatory: there is no implicit
@@ -109,7 +135,10 @@ func New(store Store, steps Steps, decider agent.Decider, cfg Config) (*Worker, 
 	if cfg.WorkerID == "" {
 		cfg.WorkerID = fmt.Sprintf("worker-%d", time.Now().UnixNano())
 	}
-	return &Worker{store: store, decider: decider, cfg: cfg, stages: buildStages(steps)}, nil
+	if cfg.Policy.MaxWords == 0 {
+		cfg.Policy = policy.ForDuration(5)
+	}
+	return &Worker{store: store, decider: decider, cfg: cfg, stages: buildStages(steps), gates: buildGates(cfg.Policy)}, nil
 }
 
 // buildStages maps a run's status to the step that runs while it sits there.
@@ -256,6 +285,22 @@ func (w *Worker) process(ctx context.Context, run domain.Run) error {
 			return err
 		}
 	}
+	// The output is stored before it is judged, so a human who gets a rejected
+	// run still sees exactly what was rejected. Nothing downstream reads it: the
+	// run stays in its status until the gate passes.
+	if g, ok := w.gates[run.Status]; ok {
+		report := g.check(outputs)
+		b, err := json.Marshal(report)
+		if err != nil {
+			return fmt.Errorf("encode qa report: %w", err)
+		}
+		if err := w.store.SetOutput(ctx, run.ID, g.key, string(b)); err != nil {
+			return err
+		}
+		if !report.Pass {
+			return w.handleRejection(ctx, run, st, report)
+		}
+	}
 	next := domain.NextStatus(run.Status)
 	w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: next, Decision: agent.Act, Reason: d.Reason})
 	return w.store.UpdateRunStatus(ctx, run.ID, next)
@@ -287,6 +332,26 @@ func (w *Worker) handleFailure(ctx context.Context, run domain.Run, st stage, er
 
 	w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: domain.StatusFailed, Reason: "permanent error, not retrying", Err: err})
 	return w.store.SetFailed(ctx, run.ID, msg)
+}
+
+// handleRejection applies the Day 6 policy to a gate that said no: the step
+// runs again, up to MaxAttempts failed attempts in a row (rejections and
+// errors count the same), then the run is parked for a human. The retry is the
+// same request. Feeding the reason back to the model is the Day 7 fix engine.
+func (w *Worker) handleRejection(ctx context.Context, run domain.Run, st stage, report qa.Report) error {
+	why := report.Summary()
+	n, err := w.store.RecordFailure(ctx, run.ID, fmt.Sprintf("%s: qa rejected: %s", st.name, why))
+	if err != nil {
+		return err
+	}
+	if n >= w.cfg.MaxAttempts {
+		reason := fmt.Sprintf("%s was rejected by QA %d times in a row, last: %s", st.name, n, why)
+		w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: domain.StatusNeedsReview, Reason: reason, Err: errors.New(why)})
+		return w.store.SetNeedsReview(ctx, run.ID, reason)
+	}
+	w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: run.Status,
+		Reason: fmt.Sprintf("qa rejected %d of %d, will retry", n, w.cfg.MaxAttempts), Err: errors.New(why)})
+	return nil
 }
 
 func (w *Worker) emit(e Event) {

@@ -111,3 +111,26 @@ func TestFiveSentenceParagraphAndLongSentenceAreBothCaught(t *testing.T) {
 		t.Fatalf("long sentence: got %v", got)
 	}
 }
+
+func TestSampleScriptFollowsEveryRule(t *testing.T) {
+	rep := Measure(SampleScript(12), policy.ForDuration(5))
+	if !rep.Clean() {
+		t.Fatalf("the sample must be clean, got %v", rep.Violations)
+	}
+	if rep.Words != 624 {
+		t.Fatalf("words = %d, want 624", rep.Words)
+	}
+}
+
+func TestBannedCountsListsWholeWordsInListOrder(t *testing.T) {
+	hits := BannedCounts("A warm day. War came, and war left. He did not wake up; the Fear stayed. Suddenly.")
+	want := []BannedHit{{"suddenly", 1}, {"war", 2}, {"fear", 1}, {"wake up", 1}}
+	if len(hits) != len(want) {
+		t.Fatalf("hits = %+v, want %+v", hits, want)
+	}
+	for i := range want {
+		if hits[i] != want[i] {
+			t.Fatalf("hits = %+v, want %+v", hits, want)
+		}
+	}
+}

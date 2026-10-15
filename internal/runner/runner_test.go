@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,7 +14,9 @@ import (
 	"sleepy-agent/internal/domain"
 	"sleepy-agent/internal/errs"
 	"sleepy-agent/internal/llm"
+	"sleepy-agent/internal/policy"
 	"sleepy-agent/internal/runner"
+	"sleepy-agent/internal/script"
 	"sleepy-agent/internal/store"
 )
 
@@ -37,7 +40,7 @@ func newRig(t *testing.T, st *store.File, decider agent.Decider) *rig {
 		voice:     &runner.MockVoice{},
 		renderer:  &runner.MockRenderer{},
 		publisher: &runner.MockPublisher{},
-		script:    llm.NewMock("The forest is slow and warm. Breathe in. Breathe out.", "A Quiet Forest"),
+		script:    llm.NewMock(script.SampleScript(12), "A Quiet Forest"),
 	}
 	if decider == nil {
 		decider = runner.PublishGate{Runs: st}
@@ -57,6 +60,25 @@ func newRig(t *testing.T, st *store.File, decider agent.Decider) *rig {
 	}
 	r.worker = w
 	return r
+}
+
+// rewire builds a new worker around r.script, for tests that script the model.
+func (r *rig) rewire(t *testing.T, st *store.File) {
+	t.Helper()
+	w, err := runner.New(st, runner.Steps{
+		Scripter:  runner.LLMScripter{Provider: r.script},
+		Voice:     r.voice,
+		Renderer:  r.renderer,
+		Publisher: r.publisher,
+	}, runner.PublishGate{Runs: st}, runner.Config{WorkerID: "w1", Observer: func(e runner.Event) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.events = append(r.events, e)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.worker = w
 }
 
 func mustRun(t *testing.T, st *store.File, id string) domain.Run {
@@ -433,11 +455,15 @@ func TestConcurrentWorkersNeverDoubleProcessARun(t *testing.T) {
 }
 
 // echoProvider answers any request, so concurrent runs never exhaust a script.
+// It gives a script that passes the gate, and a short name for the title call.
 type echoProvider struct{}
 
 func (*echoProvider) Name() string { return "echo" }
-func (*echoProvider) Complete(context.Context, llm.Request) (llm.Response, error) {
-	return llm.Response{Content: "calm words"}, nil
+func (*echoProvider) Complete(_ context.Context, req llm.Request) (llm.Response, error) {
+	if strings.Contains(req.Messages[0].Content, "episode name") {
+		return llm.Response{Content: "Calm Words"}, nil
+	}
+	return llm.Response{Content: script.SampleScript(12)}, nil
 }
 
 func TestObserverSeesTheApprovalQuestion(t *testing.T) {
@@ -492,5 +518,102 @@ func TestLLMScripterReturnsTheScriptAsBodyAndTheNameAsTitle(t *testing.T) {
 	}
 	if got.Body != "A calm body of text." || got.Title != "Velvet Meadow" {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// shortScript is far below the 500 word minimum of a 5 minute episode.
+const shortScript = "The forest is slow and warm. Breathe in. Breathe out."
+
+func TestGateRejectionRetriesThenParksTheRunForReview(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory(nil)
+	r := newRig(t, st, nil)
+	// Three attempts, each is one script call and one title call.
+	r.script = llm.NewMock(shortScript, "A", shortScript, "B", shortScript, "C", shortScript, "D")
+	r.rewire(t, st)
+	run, _ := st.CreateRun(ctx, "t")
+
+	if err := r.worker.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRun(t, st, run.ID)
+	if got.Status != domain.StatusNeedsReview {
+		t.Fatalf("want NEEDS_REVIEW, got %s", got.Status)
+	}
+	if n := len(r.script.Requests()); n != 2*runner.DefaultMaxAttempts {
+		t.Fatalf("model calls = %d, want %d (script and title, three attempts)", n, 2*runner.DefaultMaxAttempts)
+	}
+	if r.voice.Calls() != 0 {
+		t.Fatal("a rejected script must never reach the voice step")
+	}
+	for _, want := range []string{"WORDCOUNT_LOW", "word count 10 < minimum 500", "3 times"} {
+		if !strings.Contains(got.LastError, want) {
+			t.Errorf("reason %q should contain %q", got.LastError, want)
+		}
+	}
+	// The reviewer sees what was rejected and why.
+	if got.Outputs[domain.OutputScript] != shortScript {
+		t.Errorf("the rejected script should be kept, got %q", got.Outputs[domain.OutputScript])
+	}
+	if rep := got.Outputs[domain.OutputQAScript]; !strings.Contains(rep, `"pass":false`) || !strings.Contains(rep, "WORDCOUNT_LOW") {
+		t.Errorf("qa report = %s", rep)
+	}
+}
+
+func TestRejectedScriptIsRetriedAndASecondTryThatPassesGoesOn(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory(nil)
+	r := newRig(t, st, nil)
+	r.script = llm.NewMock(shortScript, "A Quiet Forest", script.SampleScript(12), "A Quiet Forest")
+	r.rewire(t, st)
+	run, _ := st.CreateRun(ctx, "t")
+
+	if err := r.worker.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRun(t, st, run.ID)
+	if got.Status != domain.StatusUploaded {
+		t.Fatalf("want UPLOADED, got %s (%s)", got.Status, got.LastError)
+	}
+	if got.Outputs[domain.OutputScript] != script.SampleScript(12) {
+		t.Fatal("the accepted script must replace the rejected one")
+	}
+	if rep := got.Outputs[domain.OutputQAScript]; !strings.Contains(rep, `"pass":true`) {
+		t.Errorf("the report of the passing attempt should be kept, got %s", rep)
+	}
+	if r.voice.Calls() != 1 {
+		t.Fatalf("voice calls = %d, want 1", r.voice.Calls())
+	}
+	if got.FailedAttempts != 0 {
+		t.Fatalf("the failure counter must reset once the run advances, got %d", got.FailedAttempts)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e := r.events[0]; e.Stage != "script" || e.To != domain.StatusPending || !strings.Contains(e.Reason, "qa rejected 1 of 3") ||
+		e.Err == nil || !strings.Contains(e.Err.Error(), "WORDCOUNT_LOW") {
+		t.Fatalf("first event should be the rejection, got %+v", e)
+	}
+}
+
+func TestGatePolicyComesFromTheConfig(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory(nil)
+	// A 1 minute episode allows 100 to 160 words. The 624 word sample is too long.
+	w, err := runner.New(st, runner.Steps{
+		Scripter:  runner.LLMScripter{Provider: &echoProvider{}},
+		Voice:     &runner.MockVoice{},
+		Renderer:  &runner.MockRenderer{},
+		Publisher: &runner.MockPublisher{},
+	}, agent.AlwaysAct{}, runner.Config{MaxAttempts: 1, Policy: policy.ForDuration(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _ := st.CreateRun(ctx, "t")
+	if err := w.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRun(t, st, run.ID)
+	if got.Status != domain.StatusNeedsReview || !strings.Contains(got.LastError, "WORDCOUNT_HIGH") {
+		t.Fatalf("want NEEDS_REVIEW for WORDCOUNT_HIGH, got %s (%s)", got.Status, got.LastError)
 	}
 }

@@ -55,6 +55,29 @@ var bannedRe = func() *regexp.Regexp {
 	return regexp.MustCompile(`(?i)\b(` + strings.Join(parts, "|") + `)\b`)
 }()
 
+// BannedHit is one banned phrase and how often it occurs in a text.
+type BannedHit struct {
+	Phrase string
+	Count  int
+}
+
+// BannedCounts finds the banned phrases in text: whole words only, case
+// insensitive, listed in the order of BannedPhrases. Measure and the QA gate
+// both use it, so they can never disagree about what counts as a banned word.
+func BannedCounts(text string) []BannedHit {
+	counts := map[string]int{}
+	for _, m := range bannedRe.FindAllString(text, -1) {
+		counts[strings.ToLower(m)]++
+	}
+	var out []BannedHit
+	for _, p := range BannedPhrases {
+		if n := counts[strings.ToLower(p)]; n > 0 {
+			out = append(out, BannedHit{Phrase: p, Count: n})
+		}
+	}
+	return out
+}
+
 var markdownLineRe = regexp.MustCompile(`^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s)`)
 
 // Measure counts how a script follows the rules in the prompt, against the
@@ -86,12 +109,8 @@ func Measure(text string, p policy.Policy) Report {
 		}
 	}
 
-	found := map[string]struct{}{}
-	for _, m := range bannedRe.FindAllString(text, -1) {
-		found[strings.ToLower(m)] = struct{}{}
-	}
-	for m := range found {
-		r.BannedFound = append(r.BannedFound, m)
+	for _, h := range BannedCounts(text) {
+		r.BannedFound = append(r.BannedFound, h.Phrase)
 	}
 	sort.Strings(r.BannedFound)
 

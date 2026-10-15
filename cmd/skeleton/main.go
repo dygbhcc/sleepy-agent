@@ -2,8 +2,9 @@
 // topic to a published video through the whole state machine.
 //
 // Everything is a mock and the publisher is a dry run, so it needs no key and
-// publishes nothing. What it shows is the shape: one step per iteration, and a
-// publish step that waits for a human.
+// publishes nothing. What it shows is the shape: one step per iteration, a QA
+// gate that rejects a bad script and lets the retry through, and a publish step
+// that waits for a human.
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"sleepy-agent/internal/agent"
 	"sleepy-agent/internal/llm"
 	"sleepy-agent/internal/runner"
+	"sleepy-agent/internal/script"
 	"sleepy-agent/internal/store"
 )
 
@@ -30,10 +32,16 @@ func main() {
 
 func run(ctx context.Context, topic string) error {
 	st := store.NewMemory(nil)
-	script := llm.NewMock("The forest is slow and warm. Breathe in. Breathe out.", "The Quiet Forest")
+	// The first attempt is far too short, so the QA gate rejects it and the worker
+	// runs the script step again. The second attempt passes. Each attempt is one
+	// script call and one title call.
+	model := llm.NewMock(
+		"The forest is slow and warm. Breathe in. Breathe out.", "The Quiet Forest",
+		script.SampleScript(12), "The Quiet Forest",
+	)
 
 	w, err := runner.New(st, runner.Steps{
-		Scripter:  runner.LLMScripter{Provider: script},
+		Scripter:  runner.LLMScripter{Provider: model},
 		Voice:     &runner.MockVoice{},
 		Renderer:  &runner.MockRenderer{},
 		Publisher: runner.DryRunPublisher{}, // the default: reports, never publishes
@@ -46,7 +54,7 @@ func run(ctx context.Context, topic string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("topic     : %s\nrun       : %s\nadapters  : mock voice, mock renderer, dry-run publisher\n\n", topic, r.ID)
+	fmt.Printf("topic     : %s\nrun       : %s\nadapters  : mock model (first script is too short on purpose), mock voice, mock renderer, dry-run publisher\n\n", topic, r.ID)
 
 	fmt.Println("-- no approval given --")
 	if err := w.Drain(ctx); err != nil {
