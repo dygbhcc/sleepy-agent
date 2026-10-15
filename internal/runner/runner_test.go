@@ -618,13 +618,13 @@ func TestGatePolicyComesFromTheConfig(t *testing.T) {
 	}
 }
 
-func TestTruncatedScriptFailsTheRunAtOnceWithoutRetry(t *testing.T) {
+func TestTruncatedScriptIsRetriedThenParksTheRunForReview(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory(nil)
 	r := newRig(t, st, nil)
 	cut := llm.Response{Content: "The scene settles into gentle harmony", FinishReason: "length",
 		Usage: llm.Usage{PromptTokens: 90, CompletionTokens: 1500}}
-	r.script = llm.NewMockResponses(cut, cut, cut)
+	r.script = llm.NewMockResponses(cut, cut, cut, cut)
 	r.rewire(t, st)
 	run, _ := st.CreateRun(ctx, "t")
 
@@ -632,15 +632,98 @@ func TestTruncatedScriptFailsTheRunAtOnceWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := mustRun(t, st, run.ID)
-	if got.Status != domain.StatusFailed || !strings.Contains(got.LastError, "token limit") {
-		t.Fatalf("want FAILED for the token limit, got %s (%s)", got.Status, got.LastError)
+	if got.Status != domain.StatusNeedsReview {
+		t.Fatalf("want NEEDS_REVIEW, got %s (%s)", got.Status, got.LastError)
 	}
-	// The same request with the same budget would be cut off again, so it is
-	// not retried. Raising the budget is a configuration change.
-	if n := len(r.script.Requests()); n != 1 {
-		t.Fatalf("model calls = %d, want 1", n)
+	// A truncated chunk is an error before the title call, so one model call each.
+	if n := len(r.script.Requests()); n != runner.DefaultMaxAttempts {
+		t.Fatalf("model calls = %d, want %d", n, runner.DefaultMaxAttempts)
+	}
+	for _, want := range []string{"3 times", "token limit", `finish_reason "length"`, "max_tokens 1500"} {
+		if !strings.Contains(got.LastError, want) {
+			t.Errorf("reason %q should contain %q", got.LastError, want)
+		}
+	}
+	if r.voice.Calls() != 0 {
+		t.Fatal("a cut off script must never reach the voice step")
 	}
 	if got.Outputs[domain.OutputScript] != "" {
 		t.Fatalf("the cut off text must not be kept as the script: %q", got.Outputs[domain.OutputScript])
+	}
+}
+
+func TestTruncatedScriptThenACompleteOneGoesOn(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory(nil)
+	r := newRig(t, st, nil)
+	r.script = llm.NewMockResponses(
+		llm.Response{Content: "cut off here", FinishReason: "length"},
+		llm.Response{Content: script.SampleScript(12), FinishReason: "stop"},
+		llm.Response{Content: "A Quiet Forest"},
+	)
+	r.rewire(t, st)
+	run, _ := st.CreateRun(ctx, "t")
+
+	if err := r.worker.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRun(t, st, run.ID)
+	if got.Status != domain.StatusUploaded || got.FailedAttempts != 0 {
+		t.Fatalf("want UPLOADED with the counter reset, got %s attempts=%d (%s)", got.Status, got.FailedAttempts, got.LastError)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e := r.events[0]; !strings.Contains(e.Reason, "reply cut off at the token limit 1 of 3") || e.To != domain.StatusPending {
+		t.Fatalf("first event should be the retry, got %+v", e)
+	}
+}
+
+func TestTruncationsAndQARejectionsShareOneAttemptCounter(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory(nil)
+	r := newRig(t, st, nil)
+	r.script = llm.NewMockResponses(
+		llm.Response{Content: "cut off", FinishReason: "length"},       // attempt 1: truncated
+		llm.Response{Content: shortScript},                             // attempt 2: script ...
+		llm.Response{Content: "Quiet Title"},                           // ... and its title, rejected by QA
+		llm.Response{Content: "cut off again", FinishReason: "length"}, // attempt 3: truncated
+		llm.Response{Content: script.SampleScript(12)},                 // would pass, but is never asked for
+	)
+	r.rewire(t, st)
+	run, _ := st.CreateRun(ctx, "t")
+
+	if err := r.worker.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRun(t, st, run.ID)
+	if got.Status != domain.StatusNeedsReview {
+		t.Fatalf("want NEEDS_REVIEW after 3 mixed failed attempts, got %s (%s)", got.Status, got.LastError)
+	}
+	if n := len(r.script.Requests()); n != 4 { // truncated, script, title, truncated
+		t.Fatalf("model calls = %d, want 4", n)
+	}
+}
+
+func TestAnEmptyReplyThatHitTheTokenLimitIsRetriedLikeATruncation(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory(nil)
+	r := newRig(t, st, nil)
+	// What gpt-oss-120b did in 6 of 6 measured runs: all tokens spent reasoning.
+	empty := llm.Response{Content: "", FinishReason: "length", ReasoningTokens: 1498,
+		Usage: llm.Usage{PromptTokens: 90, CompletionTokens: 1500}}
+	r.script = llm.NewMockResponses(empty, empty, empty, empty)
+	r.rewire(t, st)
+	run, _ := st.CreateRun(ctx, "t")
+
+	if err := r.worker.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRun(t, st, run.ID)
+	if got.Status != domain.StatusNeedsReview || len(r.script.Requests()) != runner.DefaultMaxAttempts {
+		t.Fatalf("want NEEDS_REVIEW after %d calls, got %s after %d (%s)",
+			runner.DefaultMaxAttempts, got.Status, len(r.script.Requests()), got.LastError)
+	}
+	if !strings.Contains(got.LastError, "1498 reasoning") {
+		t.Fatalf("the reviewer needs the numbers: %s", got.LastError)
 	}
 }

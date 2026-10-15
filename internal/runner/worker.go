@@ -24,6 +24,7 @@ import (
 	"sleepy-agent/internal/errs"
 	"sleepy-agent/internal/policy"
 	"sleepy-agent/internal/qa"
+	"sleepy-agent/internal/script"
 )
 
 const toolPrefix = "stage."
@@ -72,7 +73,7 @@ type Event struct {
 // Config tunes a Worker. The zero value is usable.
 type Config struct {
 	WorkerID    string
-	MaxAttempts int // consecutive transient failures before NEEDS_REVIEW; 0 = DefaultMaxAttempts
+	MaxAttempts int // consecutive transient failures, truncations or QA rejections before NEEDS_REVIEW; 0 = DefaultMaxAttempts
 	// MaxDrainSteps caps the steps one Drain call may take; 0 = DefaultMaxDrainSteps.
 	MaxDrainSteps int
 	// Policy is what the script gate holds scripts to. The zero value means a 5
@@ -306,9 +307,13 @@ func (w *Worker) process(ctx context.Context, run domain.Run) error {
 	return w.store.UpdateRunStatus(ctx, run.ID, next)
 }
 
-// handleFailure applies the Day 4 failure policy:
+// handleFailure applies the failure policy:
 //   - the context was cancelled: not the step's fault, leave the run as it is;
-//   - transient error: stay in the same status and retry, up to MaxAttempts;
+//   - transient error, or a reply cut off at the token limit: stay in the same
+//     status and retry, up to MaxAttempts, then park the run for a human. A
+//     truncation is retried because the output is stochastic and a model that
+//     was cut off once may finish the next time, the same way QA rejections are
+//     retried. The retry is the same request, a smarter one is Day 7;
 //   - anything else: the run is FAILED, no retry.
 func (w *Worker) handleFailure(ctx context.Context, run domain.Run, st stage, err error) error {
 	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
@@ -316,7 +321,8 @@ func (w *Worker) handleFailure(ctx context.Context, run domain.Run, st stage, er
 	}
 	msg := fmt.Sprintf("%s: %v", st.name, err)
 
-	if errs.IsTransient(err) {
+	truncated := errors.Is(err, script.ErrTruncated)
+	if errs.IsTransient(err) || truncated {
 		n, serr := w.store.RecordFailure(ctx, run.ID, msg)
 		if serr != nil {
 			return serr
@@ -326,7 +332,11 @@ func (w *Worker) handleFailure(ctx context.Context, run domain.Run, st stage, er
 			w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: domain.StatusNeedsReview, Reason: reason, Err: err})
 			return w.store.SetNeedsReview(ctx, run.ID, reason)
 		}
-		w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: run.Status, Reason: fmt.Sprintf("transient failure %d of %d, will retry", n, w.cfg.MaxAttempts), Err: err})
+		kind := "transient failure"
+		if truncated {
+			kind = "reply cut off at the token limit"
+		}
+		w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: run.Status, Reason: fmt.Sprintf("%s %d of %d, will retry", kind, n, w.cfg.MaxAttempts), Err: err})
 		return nil
 	}
 

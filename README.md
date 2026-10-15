@@ -49,7 +49,7 @@ flowchart LR
     G -. Decider: ask .-> I((human approval))
     I --> G
     A & B & C & D & E & F & G -. permanent error .-> X[FAILED]
-    A & B & C & D & E & F & G -. repeated transient error, QA rejected 3 times, or Decider stop .-> R[NEEDS_REVIEW]
+    A & B & C & D & E & F & G -. repeated transient error, QA rejected or cut off 3 times, or Decider stop .-> R[NEEDS_REVIEW]
 ```
 
 Not built yet, but where it goes: a fix engine that tells the model why it was
@@ -107,8 +107,9 @@ Design rules the code follows:
   reasoning. With `reasoning_effort` low a script came back in 5 of 6 runs, and
   the gate accepted 2 of those 6 attempts. Table and caveats:
   `docs/script-reasoning-budget.md`. A reply cut off by the token limit
-  (`finish_reason: length`) is a generation error, the run is FAILED and not
-  retried with the same request. Not measured: why the model reasons up to
+  (`finish_reason: length`) is a generation error that is retried like a QA
+  rejection (the same counter, 3 failed attempts in a row, then NEEDS_REVIEW).
+  The cut off text is dropped, never used as a script. Not measured: why the model reasons up to
   the limit with this prompt, and why Qwen ignores only the sentence length
   rule.
 - The gate on real output (`make script`, `qwen/qwen3.8-27b`, 3 scripts, one

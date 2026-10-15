@@ -139,13 +139,21 @@ func (g *Generator) Generate(ctx context.Context, topic string) (Result, error) 
 			return res, fmt.Errorf("script: chunk %d of %d: %w", i+1, numChunks, err)
 		}
 		text := cleanChunkOutput(resp.Content)
-		if text == "" {
-			return res, fmt.Errorf("script: chunk %d of %d: the model returned no script text (raw %d bytes, finish_reason %q, %d completion tokens of which %d reasoning, max_tokens %d)",
-				i+1, numChunks, len(resp.Content), resp.FinishReason, resp.Usage.CompletionTokens, resp.ReasoningTokens, g.cfg.MaxTokensPerChunk)
-		}
-		if resp.FinishReason == "length" {
-			return res, fmt.Errorf("script: chunk %d of %d: %w (finish_reason %q, %d completion tokens of which %d reasoning, max_tokens %d); the %d words it wrote are cut off and were dropped",
-				i+1, numChunks, ErrTruncated, resp.FinishReason, resp.Usage.CompletionTokens, resp.ReasoningTokens, g.cfg.MaxTokensPerChunk, len(strings.Fields(text)))
+		cutOff := resp.FinishReason == "length"
+		detail := fmt.Sprintf("finish_reason %q, %d completion tokens of which %d reasoning, max_tokens %d",
+			resp.FinishReason, resp.Usage.CompletionTokens, resp.ReasoningTokens, g.cfg.MaxTokensPerChunk)
+		switch {
+		case text == "" && cutOff:
+			// The model spent the whole budget before it wrote anything, which
+			// is what a reasoning model does when it thinks up to the limit.
+			return res, fmt.Errorf("script: chunk %d of %d: %w, the model returned no script text (raw %d bytes, %s)",
+				i+1, numChunks, ErrTruncated, len(resp.Content), detail)
+		case text == "":
+			return res, fmt.Errorf("script: chunk %d of %d: the model returned no script text (raw %d bytes, %s)",
+				i+1, numChunks, len(resp.Content), detail)
+		case cutOff:
+			return res, fmt.Errorf("script: chunk %d of %d: %w (%s); the %d words it wrote are cut off and were dropped",
+				i+1, numChunks, ErrTruncated, detail, len(strings.Fields(text)))
 		}
 		res.Chunks++
 		parts = append(parts, text)

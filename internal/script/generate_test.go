@@ -164,6 +164,26 @@ func TestATruncatedChunkIsAnErrorAndItsTextIsDropped(t *testing.T) {
 	}
 }
 
+func TestAnEmptyReplyThatHitTheLimitIsTruncatedToo(t *testing.T) {
+	// The gpt-oss failure: 1498 of 1500 completion tokens were reasoning, so no
+	// text at all. It must be the same retryable error as a cut off script.
+	m := llm.NewMockResponses(llm.Response{Content: "", FinishReason: "length", ReasoningTokens: 1498,
+		Usage: llm.Usage{PromptTokens: 90, CompletionTokens: 1500}})
+	_, err := gen(t, m, Config{MaxTokensPerChunk: 1500}).Generate(context.Background(), "x")
+	if !errors.Is(err, ErrTruncated) {
+		t.Fatalf("want ErrTruncated, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "no script text") || !strings.Contains(err.Error(), "1498 reasoning") {
+		t.Fatalf("the message must say what happened: %v", err)
+	}
+	// An empty reply that did NOT hit the limit is a plain error.
+	m = llm.NewMockResponses(llm.Response{Content: "  ", FinishReason: "stop"})
+	_, err = gen(t, m, Config{}).Generate(context.Background(), "x")
+	if err == nil || errors.Is(err, ErrTruncated) || !strings.Contains(err.Error(), "no script text") {
+		t.Fatalf("want a plain empty reply error, got %v", err)
+	}
+}
+
 func TestOnlyFinishReasonLengthMarksATruncatedChunk(t *testing.T) {
 	for _, reason := range []string{"", "stop", "tool_calls"} {
 		m := llm.NewMockResponses(llm.Response{Content: cleanScript(12), FinishReason: reason}, llm.Response{Content: "Velvet Meadow"})
