@@ -24,7 +24,7 @@ Needs Go 1.23 or newer. No API key, no network.
 ```bash
 make skeleton # one mock episode through the state machine: the QA gate rejects a short script once, publish waits for approval
 make demo     # the agent loop; scripted mock, or a real model if GROQ_API_KEY and GROQ_MODEL are set
-make script   # generate scripts with the ported generator, measure the raw failure rate and what the QA gate would say (needs GROQ_API_KEY and GROQ_MODEL for a real result)
+make script   # generate scripts with the ported generator, measure the raw failure rate and what the QA gate would say (needs GROQ_API_KEY and GROQ_MODEL for a real result; MAX_TOKENS and REASONING_EFFORT low|medium|high, for gpt-oss, change the token budget and reasoning)
 make compare  # native vs prompt based tool calling, N runs each (needs GROQ_API_KEY and GROQ_MODEL for a real result)
 make test     # tests with the race detector
 make lint     # gofmt and go vet
@@ -101,11 +101,16 @@ Design rules the code follows:
   scripts: 0 of 7 clean. The structure held (4 sentences per paragraph, 12 to 14
   paragraphs) but sentences were 5 to 7 words on average instead of 8 to 20, so
   scripts had about 314 words against a 500 minimum; all 7 broke `too_short`
-  and `sentence_not_8_to_20_words`. `openai/gpt-oss-120b`: no script text in any
-  of the 3 runs; in the one run with diagnostics 1498 of 1500 completion tokens
-  were hidden reasoning. Not measured yet: whether a larger token budget or a
-  lower reasoning effort fixes gpt-oss, and why Qwen ignores only the sentence
-  length rule.
+  and `sentence_not_8_to_20_words`. `openai/gpt-oss-120b`, 3 runs per setting: the
+  default budget (1500 tokens) and a 4000 token budget both returned no script
+  text in 3 of 3 runs, with all but 2 completion tokens spent on hidden
+  reasoning. With `reasoning_effort` low a script came back in 5 of 6 runs, and
+  the gate accepted 2 of those 6 attempts. Table and caveats:
+  `docs/script-reasoning-budget.md`. A reply cut off by the token limit
+  (`finish_reason: length`) is a generation error, the run is FAILED and not
+  retried with the same request. Not measured: why the model reasons up to
+  the limit with this prompt, and why Qwen ignores only the sentence length
+  rule.
 - The gate on real output (`make script`, `qwen/qwen3.8-27b`, 3 scripts, one
   attempt each): 1 of 3 accepted. Two were rejected `WORDCOUNT_LOW` (387 and 343
   words), one of them also for the banned word "disappear". The accepted script

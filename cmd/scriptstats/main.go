@@ -7,6 +7,11 @@
 // There is no retry on bad output: the numbers are what the model does on its
 // own, so "gate pass" is the share of first attempts the pipeline would accept.
 //
+// MAX_TOKENS sets the token budget per chunk (default: the generator's own,
+// 1500) and REASONING_EFFORT (low, medium or high, gpt-oss models) is sent to
+// the model. Both exist to answer one measured failure: a reasoning model that
+// spends its whole budget thinking and returns no script.
+//
 // Without GROQ_API_KEY it uses scripted mocks, which only proves the harness
 // works. With a key, GROQ_MODEL is required (there is no default model).
 //
@@ -60,9 +65,13 @@ func main() {
 		style = "Earthside"
 	}
 
+	maxTokens := envInt("MAX_TOKENS", 0, 0, 32000)
 	build, label := source()
-	cfg := script.Config{Style: style, DurationMin: duration}
+	cfg := config(style, duration, maxTokens)
 	fmt.Printf("model: %s, style %s, %d minute episodes, %d runs\n", label, style, duration, runs)
+	if maxTokens > 0 {
+		fmt.Printf("max tokens per chunk: %d (generator default is used when MAX_TOKENS is not set)\n", maxTokens)
+	}
 	fmt.Printf("pause between runs: %s\n\n", pause())
 
 	sum := summary{runs: runs, violations: map[string]int{}, gateFails: map[qa.FailType]int{}}
@@ -202,15 +211,27 @@ func source() (func(run int, retries *int) llm.Provider, string) {
 		fmt.Fprintln(os.Stderr, "GROQ_MODEL is required when GROQ_API_KEY is set (see https://api.groq.com/openai/v1/models)")
 		os.Exit(2)
 	}
+	effort := os.Getenv("REASONING_EFFORT")
+	// Check the setting once, before any call is made.
+	if err := llm.NewGroq(key, model).SetReasoningEffort(effort); err != nil {
+		fmt.Fprintln(os.Stderr, "REASONING_EFFORT:", err)
+		os.Exit(2)
+	}
+	label := "groq:" + model
+	if effort != "" {
+		label += " [reasoning " + effort + "]"
+	}
 	return func(_ int, retries *int) llm.Provider {
+		g := llm.NewGroq(key, model)
+		_ = g.SetReasoningEffort(effort) // validated above
 		return &llm.Retrying{
-			Inner: llm.NewGroq(key, model),
+			Inner: g,
 			OnRetry: func(attempt int, wait time.Duration, _ error) {
 				*retries++
 				fmt.Fprintf(os.Stderr, "  rate limited or unavailable, waiting %s (retry %d of 3)\n", wait, attempt)
 			},
 		}
-	}, "groq:" + model
+	}, label
 }
 
 // mockFor plays a model for the keyless run: odd runs are clean, even runs
@@ -222,6 +243,12 @@ func mockFor(run int, _ *int) llm.Provider {
 		body = strings.Replace(body, "quiet meadow", "meadow without any panic", 1)
 	}
 	return llm.NewMock(body, "Velvet Meadow")
+}
+
+// config is the generator setup for a run. A zero maxTokens keeps the
+// generator's own default budget per chunk.
+func config(style string, duration, maxTokens int) script.Config {
+	return script.Config{Style: style, DurationMin: duration, MaxTokensPerChunk: maxTokens}
 }
 
 func pause() time.Duration {

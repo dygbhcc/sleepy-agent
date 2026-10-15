@@ -241,3 +241,47 @@ func TestOpenAICompatToolCallWithNoArgumentsGetsAnEmptyMap(t *testing.T) {
 		t.Fatalf("resp %+v err %v", resp, err)
 	}
 }
+
+func TestReasoningEffortIsSentOnlyWhenSetAndShowsInTheName(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"x"}}]}`))
+	}))
+	defer srv.Close()
+	p := newTestProvider(srv)
+
+	if _, err := p.Complete(context.Background(), Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["reasoning_effort"]; ok {
+		t.Fatal("reasoning_effort must be absent by default, models without it may reject it")
+	}
+	if p.Name() != "test:m1" {
+		t.Fatalf("name = %q", p.Name())
+	}
+
+	if err := p.SetReasoningEffort("low"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Complete(context.Background(), Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if got["reasoning_effort"] != "low" {
+		t.Fatalf("reasoning_effort = %v", got["reasoning_effort"])
+	}
+	if p.Name() != "test:m1 [reasoning low]" {
+		t.Fatalf("name = %q", p.Name())
+	}
+
+	if err := p.SetReasoningEffort("extreme"); err == nil {
+		t.Fatal("an unknown effort must be rejected")
+	}
+	if p.reasoningEffort != "low" {
+		t.Fatal("a rejected value must not change the setting")
+	}
+	if err := p.SetReasoningEffort(""); err != nil || p.Name() != "test:m1" {
+		t.Fatalf("empty turns it off: %v %q", err, p.Name())
+	}
+}

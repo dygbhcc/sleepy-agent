@@ -15,6 +15,12 @@ const (
 	wordsPerParagraph  = 56 // 4 sentences of about 14 words
 )
 
+// ErrTruncated means the model stopped because it hit the token limit
+// (finish_reason "length"), so what it wrote is cut off. The text is not used:
+// a script that ends mid sentence must never look finished to the next step.
+// Raising MaxTokensPerChunk, or making the model reason less, is the usual fix.
+var ErrTruncated = errors.New("the model stopped at the token limit")
+
 // Config tunes the generator. Zero values pick Sleepy's defaults.
 type Config struct {
 	Series            string  // default "Sleepy"
@@ -136,6 +142,10 @@ func (g *Generator) Generate(ctx context.Context, topic string) (Result, error) 
 		if text == "" {
 			return res, fmt.Errorf("script: chunk %d of %d: the model returned no script text (raw %d bytes, finish_reason %q, %d completion tokens of which %d reasoning, max_tokens %d)",
 				i+1, numChunks, len(resp.Content), resp.FinishReason, resp.Usage.CompletionTokens, resp.ReasoningTokens, g.cfg.MaxTokensPerChunk)
+		}
+		if resp.FinishReason == "length" {
+			return res, fmt.Errorf("script: chunk %d of %d: %w (finish_reason %q, %d completion tokens of which %d reasoning, max_tokens %d); the %d words it wrote are cut off and were dropped",
+				i+1, numChunks, ErrTruncated, resp.FinishReason, resp.Usage.CompletionTokens, resp.ReasoningTokens, g.cfg.MaxTokensPerChunk, len(strings.Fields(text)))
 		}
 		res.Chunks++
 		parts = append(parts, text)

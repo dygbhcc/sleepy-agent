@@ -26,6 +26,10 @@ type OpenAICompat struct {
 	apiKey  string
 	model   string
 	client  *http.Client
+
+	// reasoningEffort is sent as reasoning_effort when not empty. See
+	// SetReasoningEffort.
+	reasoningEffort string
 }
 
 // NewGroq returns a provider for Groq. An empty model picks a default.
@@ -45,8 +49,28 @@ func NewOpenAICompat(name, baseURL, apiKey, model string) *OpenAICompat {
 	}
 }
 
-// Name implements Provider.
-func (p *OpenAICompat) Name() string { return p.name + ":" + p.model }
+// Name implements Provider. A reasoning effort, when set, is part of the name,
+// so results from different settings are never mixed up.
+func (p *OpenAICompat) Name() string {
+	n := p.name + ":" + p.model
+	if p.reasoningEffort != "" {
+		n += " [reasoning " + p.reasoningEffort + "]"
+	}
+	return n
+}
+
+// SetReasoningEffort asks the model to reason less or more: "low", "medium"
+// or "high", sent as reasoning_effort. Groq documents it for the gpt-oss
+// models; another model may reject the parameter, which is why nothing is sent
+// unless this is called. An empty string turns it off again.
+func (p *OpenAICompat) SetReasoningEffort(effort string) error {
+	switch effort {
+	case "", "low", "medium", "high":
+		p.reasoningEffort = effort
+		return nil
+	}
+	return fmt.Errorf("%s: reasoning effort must be low, medium or high, got %q", p.name, effort)
+}
 
 type chatRequest struct {
 	Model       string        `json:"model"`
@@ -54,6 +78,8 @@ type chatRequest struct {
 	Temperature float64       `json:"temperature"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Tools       []wireTool    `json:"tools,omitempty"`
+	// ReasoningEffort is only sent when the provider was told to.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// ResponseFormat forces a JSON object reply. Without it, some models
 	// (gpt-oss on Groq) try a native tool call and the API answers HTTP 400.
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
@@ -110,7 +136,7 @@ type chatResponse struct {
 // Complete implements Provider. Rate limits and server errors come back as
 // errs.TransientError so callers can retry them, everything else is permanent.
 func (p *OpenAICompat) Complete(ctx context.Context, req Request) (Response, error) {
-	body := chatRequest{Model: p.model, Temperature: req.Temperature, MaxTokens: req.MaxTokens}
+	body := chatRequest{Model: p.model, Temperature: req.Temperature, MaxTokens: req.MaxTokens, ReasoningEffort: p.reasoningEffort}
 	if req.JSON && len(req.Tools) == 0 {
 		body.ResponseFormat = &responseFormat{Type: "json_object"}
 	}

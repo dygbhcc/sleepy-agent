@@ -617,3 +617,30 @@ func TestGatePolicyComesFromTheConfig(t *testing.T) {
 		t.Fatalf("want NEEDS_REVIEW for WORDCOUNT_HIGH, got %s (%s)", got.Status, got.LastError)
 	}
 }
+
+func TestTruncatedScriptFailsTheRunAtOnceWithoutRetry(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory(nil)
+	r := newRig(t, st, nil)
+	cut := llm.Response{Content: "The scene settles into gentle harmony", FinishReason: "length",
+		Usage: llm.Usage{PromptTokens: 90, CompletionTokens: 1500}}
+	r.script = llm.NewMockResponses(cut, cut, cut)
+	r.rewire(t, st)
+	run, _ := st.CreateRun(ctx, "t")
+
+	if err := r.worker.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRun(t, st, run.ID)
+	if got.Status != domain.StatusFailed || !strings.Contains(got.LastError, "token limit") {
+		t.Fatalf("want FAILED for the token limit, got %s (%s)", got.Status, got.LastError)
+	}
+	// The same request with the same budget would be cut off again, so it is
+	// not retried. Raising the budget is a configuration change.
+	if n := len(r.script.Requests()); n != 1 {
+		t.Fatalf("model calls = %d, want 1", n)
+	}
+	if got.Outputs[domain.OutputScript] != "" {
+		t.Fatalf("the cut off text must not be kept as the script: %q", got.Outputs[domain.OutputScript])
+	}
+}

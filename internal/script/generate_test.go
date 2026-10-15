@@ -140,6 +140,53 @@ func TestEmptyChunkErrorSaysWhyTheModelStopped(t *testing.T) {
 	}
 }
 
+func TestATruncatedChunkIsAnErrorAndItsTextIsDropped(t *testing.T) {
+	cut := "Morning dew gathers gently on cool grass. The scene settles into gentle harmony"
+	m := llm.NewMockResponses(llm.Response{Content: cut, FinishReason: "length", ReasoningTokens: 1400,
+		Usage: llm.Usage{PromptTokens: 90, CompletionTokens: 1500}})
+	res, err := gen(t, m, Config{MaxTokensPerChunk: 1500}).Generate(context.Background(), "x")
+	if !errors.Is(err, ErrTruncated) {
+		t.Fatalf("want ErrTruncated, got %v", err)
+	}
+	for _, want := range []string{"chunk 1 of 1", `finish_reason "length"`, "1500 completion tokens of which 1400 reasoning", "max_tokens 1500", "13 words"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q: %v", want, err)
+		}
+	}
+	if res.Body != "" || res.Chunks != 0 {
+		t.Fatalf("the cut off text must not become a script: %+v", res)
+	}
+	if res.Usage.CompletionTokens != 1500 {
+		t.Fatalf("usage of the failed call must be reported, got %+v", res.Usage)
+	}
+	if n := len(m.Requests()); n != 1 {
+		t.Fatalf("no title call after a truncated script, got %d model calls", n)
+	}
+}
+
+func TestOnlyFinishReasonLengthMarksATruncatedChunk(t *testing.T) {
+	for _, reason := range []string{"", "stop", "tool_calls"} {
+		m := llm.NewMockResponses(llm.Response{Content: cleanScript(12), FinishReason: reason}, llm.Response{Content: "Velvet Meadow"})
+		if _, err := gen(t, m, Config{}).Generate(context.Background(), "x"); err != nil {
+			t.Errorf("finish_reason %q must be accepted, got %v", reason, err)
+		}
+	}
+}
+
+func TestTruncationInALaterChunkNamesThatChunk(t *testing.T) {
+	m := llm.NewMockResponses(
+		llm.Response{Content: cleanScript(12), FinishReason: "stop"},
+		llm.Response{Content: "A line that stops", FinishReason: "length"},
+	)
+	res, err := gen(t, m, Config{DurationMin: 10}).Generate(context.Background(), "x")
+	if !errors.Is(err, ErrTruncated) || !strings.Contains(err.Error(), "chunk 2 of 2") {
+		t.Fatalf("got %v", err)
+	}
+	if res.Chunks != 1 {
+		t.Fatalf("the finished first chunk is counted, got %d", res.Chunks)
+	}
+}
+
 func TestProviderErrorIsWrappedAndUsageSoFarKept(t *testing.T) {
 	m := llm.NewMock(cleanScript(12))
 	boom := errors.New("down")

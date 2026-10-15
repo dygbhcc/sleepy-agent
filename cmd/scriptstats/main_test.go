@@ -31,3 +31,13 @@ func TestMockRunsShowACleanAndABrokenScript(t *testing.T) {
 		t.Fatalf("the broken script must be stopped by its banned word: %s", r.Summary())
 	}
 }
+
+func TestConfigCarriesTheTokenBudgetAndKeepsTheDefaultWhenUnset(t *testing.T) {
+	c := config("Cosmos", 7, 4000)
+	if c.Style != "Cosmos" || c.DurationMin != 7 || c.MaxTokensPerChunk != 4000 {
+		t.Fatalf("config = %+v", c)
+	}
+	if got := config("Cosmos", 7, 0).MaxTokensPerChunk; got != 0 {
+		t.Fatalf("unset must stay zero so the generator default applies, got %d", got)
+	}
+}
