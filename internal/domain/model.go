@@ -52,4 +52,17 @@ const (
 	// OutputQAScript is the JSON report of the script gate, kept for passes and
 	// for rejections alike.
 	OutputQAScript = "qa_script"
+	// OutputFixState is the fix engine's memory for the run: the plan applied to
+	// the current attempt and the IDs of every plan tried so far (JSON). It is
+	// empty when no fix is in play and is cleared when the gate passes.
+	OutputFixState = "fix_state"
+	// OutputScriptSource says where the script came from: SourceModel or
+	// SourceCache. It is kept so a reviewer can tell a cached script from a fresh one.
+	OutputScriptSource = "script_source"
+)
+
+// Values of OutputScriptSource.
+const (
+	SourceModel = "model"
+	SourceCache = "cache"
 )

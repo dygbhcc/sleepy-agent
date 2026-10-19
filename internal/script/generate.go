@@ -92,19 +92,95 @@ func plan(targetWords int) (paragraphs, chunks int) {
 	return paragraphs, chunks
 }
 
+// Mode says how an adjusted attempt differs from a first one.
+type Mode string
+
+const (
+	// ModeRegenerate writes the whole script again. It is the zero value.
+	ModeRegenerate Mode = ""
+	// ModeContinue keeps PreviousBody and writes more paragraphs after it.
+	ModeContinue Mode = "continue"
+	// ModeRetitle keeps PreviousBody and only asks for a new title.
+	ModeRetitle Mode = "retitle"
+)
+
+// Adjust steers one attempt. The fix engine builds it from a failed QA report;
+// the zero value is a plain first attempt.
+type Adjust struct {
+	Mode             Mode
+	Temperature      float64 // 0 keeps the configured temperature
+	ExtraInstruction string  // a repair note added to the prompt
+	TargetWords      int     // 0 keeps the policy target
+	PreviousTitle    string  // ModeContinue keeps it, ModeRetitle falls back to it
+	PreviousBody     string  // required by ModeContinue and ModeRetitle
+}
+
+// Fingerprint identifies everything that changes what this generator writes:
+// the model, the settings and the prompt version. Two generators with the same
+// fingerprint, given the same topic, are asked the same question. It is the
+// producer half of an idempotency key.
+func (g *Generator) Fingerprint() string {
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%.2f|%d|%s", g.provider.Name(), g.cfg.Series, g.cfg.Style,
+		g.cfg.Language, g.cfg.DurationMin, g.cfg.Temperature, g.cfg.MaxTokensPerChunk, PromptVersion)
+}
+
 // Generate writes the script for a topic, chunk by chunk, then a title.
 // On error it still returns the Usage spent so far.
 func (g *Generator) Generate(ctx context.Context, topic string) (Result, error) {
+	return g.GenerateAdjusted(ctx, topic, Adjust{})
+}
+
+// GenerateAdjusted is Generate steered by a fix: a different temperature, a
+// repair note, another word target, or a continuation or a new title for a
+// script that is otherwise kept.
+func (g *Generator) GenerateAdjusted(ctx context.Context, topic string, a Adjust) (Result, error) {
 	var res Result
 	topic = strings.TrimSpace(topic)
 	if topic == "" {
 		return res, errors.New("script: topic is required")
 	}
-	totalParas, numChunks := plan(g.Policy().TargetWords)
+	switch a.Mode {
+	case ModeRegenerate, ModeContinue, ModeRetitle:
+	default:
+		return res, fmt.Errorf("script: unknown mode %q", a.Mode)
+	}
+	if a.Mode != ModeRegenerate && strings.TrimSpace(a.PreviousBody) == "" {
+		return res, fmt.Errorf("script: mode %q needs the previous script", a.Mode)
+	}
+
+	if a.Mode == ModeRetitle {
+		res.Body = a.PreviousBody
+		return g.finishTitle(ctx, topic, a, res)
+	}
+
+	target := g.Policy().TargetWords
+	if a.TargetWords > 0 {
+		target = a.TargetWords
+	}
+	var totalParas, numChunks int
+	var parts []string
+	continuing := a.Mode == ModeContinue
+	if continuing {
+		missing := target - len(strings.Fields(a.PreviousBody))
+		if missing < wordsPerParagraph {
+			missing = wordsPerParagraph // there is always something to add
+		}
+		totalParas = (missing + wordsPerParagraph - 1) / wordsPerParagraph
+		numChunks = (totalParas + paragraphsPerChunk - 1) / paragraphsPerChunk
+		parts = append(parts, strings.TrimSpace(a.PreviousBody))
+	} else {
+		totalParas, numChunks = plan(target)
+	}
+	temp := g.cfg.Temperature
+	if a.Temperature > 0 {
+		temp = a.Temperature
+	}
 	imagery := imagerySets[g.cfg.Style]
 
-	var parts []string
-	var previous string
+	previous := ""
+	if continuing {
+		previous = lastParagraphs(a.PreviousBody, 2)
+	}
 	for i := 0; i < numChunks; i++ {
 		paras := totalParas - i*paragraphsPerChunk
 		if paras > paragraphsPerChunk {
@@ -112,7 +188,7 @@ func (g *Generator) Generate(ctx context.Context, topic string) (Result, error) 
 		}
 		prompt, err := buildChunkPrompt(chunkData{
 			ParagraphCount:   paras,
-			IsFirstChunk:     i == 0,
+			IsFirstChunk:     i == 0 && !continuing,
 			IsLastChunk:      i == numChunks-1,
 			Series:           g.cfg.Series,
 			Episode:          topic,
@@ -122,6 +198,7 @@ func (g *Generator) Generate(ctx context.Context, topic string) (Result, error) 
 			PreviousContext:  previous,
 			ChunkMinWords:    paras * 50,
 			ChunkMaxWords:    paras * 65,
+			ExtraInstruction: a.ExtraInstruction,
 		})
 		if err != nil {
 			return res, fmt.Errorf("script: build prompt for chunk %d: %w", i+1, err)
@@ -131,7 +208,7 @@ func (g *Generator) Generate(ctx context.Context, topic string) (Result, error) 
 				{Role: llm.RoleSystem, Content: systemPrompt},
 				{Role: llm.RoleUser, Content: prompt},
 			},
-			Temperature: g.cfg.Temperature,
+			Temperature: temp,
 			MaxTokens:   g.cfg.MaxTokensPerChunk,
 		})
 		res.Usage = addUsage(res.Usage, resp.Usage)
@@ -161,7 +238,18 @@ func (g *Generator) Generate(ctx context.Context, topic string) (Result, error) 
 	}
 	res.Body = strings.Join(parts, "\n\n")
 
-	title, usage, err := g.title(ctx, topic, res.Body)
+	if continuing && strings.TrimSpace(a.PreviousTitle) != "" {
+		res.Title = a.PreviousTitle // the title was not what failed
+		return res, nil
+	}
+	return g.finishTitle(ctx, topic, a, res)
+}
+
+// finishTitle asks for a title and fills res.Title. A failed title call does
+// not lose a finished script: the fallback is the previous title when there is
+// one, the topic otherwise.
+func (g *Generator) finishTitle(ctx context.Context, topic string, a Adjust, res Result) (Result, error) {
+	title, usage, err := g.title(ctx, topic, res.Body, a)
 	res.Usage = addUsage(res.Usage, usage)
 	switch {
 	case err == nil:
@@ -171,11 +259,14 @@ func (g *Generator) Generate(ctx context.Context, topic string) (Result, error) 
 	default:
 		// Like Sleepy, a failed title does not lose a finished script.
 		res.Title, res.TitleFallback = topic, true
+		if strings.TrimSpace(a.PreviousTitle) != "" {
+			res.Title = a.PreviousTitle
+		}
 	}
 	return res, nil
 }
 
-func (g *Generator) title(ctx context.Context, topic, body string) (string, llm.Usage, error) {
+func (g *Generator) title(ctx context.Context, topic, body string, a Adjust) (string, llm.Usage, error) {
 	sys := fmt.Sprintf(`Generate a short episode name for a sleep narration video.
 Rules:
 - 2-5 words maximum. Short and evocative.
@@ -185,18 +276,25 @@ Rules:
 - No clickbait, no ALL CAPS, no exclamation marks, no quotes.
 - Examples: "Rings of Saturn", "The Slow Moons", "Velvet Meadow", "Amber Lanterns"
 - Return ONLY the episode name, nothing else.`, langNames[g.cfg.Language])
+	if note := strings.TrimSpace(a.ExtraInstruction); note != "" && a.Mode == ModeRetitle {
+		sys += "\n\nREPAIR NOTE (the previous title was rejected by the quality gate):\n" + note
+	}
 	user := fmt.Sprintf("Series: %s\nEpisode: %s\nStyle: %s\nDuration: %d minutes\n\nScript excerpt:\n%s",
 		g.cfg.Series, topic, g.cfg.Style, g.cfg.DurationMin, excerpt(body, 500))
 
+	temp := 0.7
+	if a.Mode == ModeRetitle && a.Temperature > 0 {
+		temp = a.Temperature
+	}
 	resp, err := g.provider.Complete(ctx, llm.Request{
 		Messages:    []llm.Message{{Role: llm.RoleSystem, Content: sys}, {Role: llm.RoleUser, Content: user}},
-		Temperature: 0.7,
+		Temperature: temp,
 		MaxTokens:   100,
 	})
 	if err != nil {
 		return "", resp.Usage, err
 	}
-	title := strings.TrimSpace(strings.Trim(strings.TrimSpace(resp.Content), "\"'“”‘’"))
+	title := strings.TrimSpace(strings.Trim(strings.TrimSpace(resp.Content), "\"'"+"“”‘’"))
 	if title == "" || strings.Contains(title, "\n") {
 		return "", resp.Usage, errors.New("script: unusable title")
 	}

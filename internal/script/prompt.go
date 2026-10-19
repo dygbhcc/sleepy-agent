@@ -7,7 +7,6 @@
 //
 //   - Banned word replacement after generation. It hides failures, and Day 5
 //     exists to measure the raw ones. Day 6 decides what to do about them.
-//   - Continuation mode. It belongs to the fix engine (Day 7).
 //   - SSML. It belongs to the voice step (Day 10).
 //   - frequency and presence penalty. Not every provider accepts them and
 //     compatibility is not verified here.
@@ -114,7 +113,15 @@ type chunkData struct {
 	PreviousContext  string
 	ChunkMinWords    int
 	ChunkMaxWords    int
+	// ExtraInstruction is a repair note from the fix engine. It is empty on a
+	// first attempt, and then the prompt is exactly what it was before Day 7.
+	ExtraInstruction string
 }
+
+// PromptVersion names the prompts and style data in this file. Bump it when
+// they change, so a script cached under the old prompt is not served as if the
+// new one had written it.
+const PromptVersion = "v1"
 
 var chunkTmpl = template.Must(template.New("chunk").Funcs(template.FuncMap{
 	"add": func(a, b int) int { return a + b },
@@ -150,6 +157,9 @@ Each paragraph becomes slightly softer and quieter.
 === PREVIOUS CONTEXT (last 2 paragraphs, DO NOT REPEAT) ===
 {{.PreviousContext}}
 === END CONTEXT ===
+{{end}}{{if .ExtraInstruction}}
+REPAIR NOTE (the previous attempt was rejected by the quality gate):
+{{.ExtraInstruction}}
 {{end}}
 Output only the {{.ParagraphCount}} new paragraphs. Nothing else.`))
 

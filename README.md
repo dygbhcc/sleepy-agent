@@ -11,11 +11,13 @@ running example is an automated episode pipeline: a topic goes in, an
 episode (title, script, later narration and video) comes out, with quality
 gates, self-healing and human approval where it matters.
 
-> Status: **Day 6 of 11.** The state machine and worker loop are ported from
+> Status: **Day 7 of 11.** The state machine and worker loop are ported from
 > Sleepy, and a walking skeleton runs a mock episode end to end. Scripts come
 > from the ported Sleepy generator and pass a QA gate before the run may
-> advance: a rejected script is retried, then parked for a human. Publishing
-> waits for a human.
+> advance: a rejected script gets a fix chosen by its failure code (a
+> continuation for a short script, a repair note naming banned words), then is
+> parked for a human. A script already accepted for the same topic and settings
+> is served from a cache. Publishing waits for a human.
 
 ## Run it
 
@@ -25,6 +27,7 @@ Needs Go 1.23 or newer. No API key, no network.
 make skeleton # one mock episode through the state machine: the QA gate rejects a short script once, publish waits for approval
 make demo     # the agent loop; scripted mock, or a real model if GROQ_API_KEY and GROQ_MODEL are set
 make script   # generate scripts with the ported generator, measure the raw failure rate and what the QA gate would say (needs GROQ_API_KEY and GROQ_MODEL for a real result; MAX_TOKENS and REASONING_EFFORT low|medium|high, for gpt-oss, change the token budget and reasoning)
+make fixstats # blind retry vs directed fix on the same topics, per failure (needs GROQ_API_KEY and GROQ_MODEL for a real result; same MAX_TOKENS and REASONING_EFFORT settings as make script)
 make compare  # native vs prompt based tool calling, N runs each (needs GROQ_API_KEY and GROQ_MODEL for a real result)
 make test     # tests with the race detector
 make lint     # gofmt and go vet
@@ -79,20 +82,26 @@ Design rules the code follows:
 | `internal/tools` | Tools the agent can call: policy, word count, repetition | new |
 | `internal/domain` | Run model and the status chain | ported |
 | `internal/runner` | Worker loop, QA gate and approval gate, adapter interfaces and mocks | ported, reduced |
+| `internal/fix` | Fix engine: a catalog of fixes keyed by failure code, a scorer that learns which fix works, repair notes built from the QA report | ported, changed |
 | `internal/qa` | The script QA gate: word count, banned phrases, sleep safety, title. Says pass or fail and why, repairs nothing | ported |
 | `internal/store` | Run storage: memory or JSON file | new (Sleepy uses Postgres) |
 | `internal/policy`, `internal/errs` | Duration limits, transient error type | ported |
 | `internal/script` | Script generator ported from Sleepy (chunked, same prompts) and `Measure`, which counts broken prompt rules without judging | ported |
 | `internal/scenario` | The one task `demo` and `compare` share, so both measure the same thing | new |
-| `cmd/demo`, `cmd/skeleton`, `cmd/compare`, `cmd/scriptstats` | The agent loop demo, the walking skeleton, the adapter comparison, the script failure rate | new |
+| `cmd/demo`, `cmd/skeleton`, `cmd/compare`, `cmd/scriptstats`, `cmd/fixstats` | The agent loop demo, the walking skeleton, the adapter comparison, the script failure rate, blind retry vs directed fix | new |
 
 ## Known limits (measured, see FAILURE_LOG.md)
 
 - The script step has a QA gate (`internal/qa`, Sleepy's thresholds). A rejected
-  script is run again as the same request, up to 3 failed attempts in a row
-  (rejections and errors share one counter), then the run is parked for a human.
-  The retry does not tell the model why it was rejected, that is the fix engine
-  on Day 7. Voice, render and package have no gate yet, they arrive with the
+  script gets a fix chosen by its failure code (`internal/fix`), up to 3 failed
+  attempts in a row (rejections and errors share one counter), then the run is
+  parked for a human. Errors and truncated replies are still plain retries.
+  Accepted scripts are cached per topic, model and prompt version. Measured on
+  Day 7 (`make fixstats`, `openai/gpt-oss-120b`, reasoning low, 4000 tokens, 8
+  topics per arm): a plain retry recovered 3 of 3 `WORDCOUNT_LOW` first
+  attempts (440, 472 and 485 words against a 500 minimum), so the directed fix
+  showed no advantage in this sample, and the two arms did not see the same
+  failures. Voice, render and package have no gate yet, they arrive with the
   real adapters. `Measure` (the prompt's strict rules) and the gate
   (production thresholds) are separate on purpose: a script can be clean for
   `Measure` and still be rejected.

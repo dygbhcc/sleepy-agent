@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"sleepy-agent/internal/agent"
+	"sleepy-agent/internal/fix"
 	"sleepy-agent/internal/llm"
 	"sleepy-agent/internal/runner"
 	"sleepy-agent/internal/script"
@@ -33,11 +34,12 @@ func main() {
 func run(ctx context.Context, topic string) error {
 	st := store.NewMemory(nil)
 	// The first attempt is far too short, so the QA gate rejects it and the worker
-	// runs the script step again. The second attempt passes. Each attempt is one
-	// script call and one title call.
+	// asks the fix engine what to do. A too short script gets a continuation,
+	// which appends to it and keeps its title. The first attempt is one script
+	// call and one title call, the continuation is one script call.
 	model := llm.NewMock(
 		"The forest is slow and warm. Breathe in. Breathe out.", "The Quiet Forest",
-		script.SampleScript(12), "The Quiet Forest",
+		script.SampleScript(12),
 	)
 
 	w, err := runner.New(st, runner.Steps{
@@ -45,7 +47,7 @@ func run(ctx context.Context, topic string) error {
 		Voice:     &runner.MockVoice{},
 		Renderer:  &runner.MockRenderer{},
 		Publisher: runner.DryRunPublisher{}, // the default: reports, never publishes
-	}, runner.PublishGate{Runs: st}, runner.Config{WorkerID: "demo", Observer: printEvent})
+	}, runner.PublishGate{Runs: st}, runner.Config{WorkerID: "demo", Observer: printEvent, Fixes: fix.NewEngine()})
 	if err != nil {
 		return err
 	}

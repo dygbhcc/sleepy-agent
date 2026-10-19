@@ -22,6 +22,15 @@ type Scripter interface {
 	Script(ctx context.Context, topic string) (Script, error)
 }
 
+// AdjustableScripter is a Scripter the fix engine can steer: after a gate
+// rejection the worker asks for the next attempt with a repair, a
+// continuation or a new title, instead of the same request again. A Scripter
+// that is not adjustable still gets plain retries.
+type AdjustableScripter interface {
+	Scripter
+	ScriptAdjusted(ctx context.Context, topic string, a script.Adjust) (Script, error)
+}
+
 // Voice turns a script into narration audio and returns a reference to it.
 type Voice interface {
 	Synthesize(ctx context.Context, script string) (ref string, err error)
@@ -64,7 +73,7 @@ func (DryRunPublisher) Publish(_ context.Context, req PublishRequest) (PublishRe
 }
 
 // LLMScripter writes scripts with an llm.Provider, using the generator ported
-// from Sleepy (internal/script). Day 6 adds QA gates after it.
+// from Sleepy (internal/script). The worker's QA gate judges what it writes.
 type LLMScripter struct {
 	Provider llm.Provider
 	Config   script.Config // zero value: 5 minute Earthside episode in English
@@ -72,13 +81,28 @@ type LLMScripter struct {
 
 // Script implements Scripter.
 func (s LLMScripter) Script(ctx context.Context, topic string) (Script, error) {
+	return s.ScriptAdjusted(ctx, topic, script.Adjust{})
+}
+
+// ScriptAdjusted implements AdjustableScripter.
+func (s LLMScripter) ScriptAdjusted(ctx context.Context, topic string, a script.Adjust) (Script, error) {
 	g, err := script.New(s.Provider, s.Config)
 	if err != nil {
 		return Script{}, err
 	}
-	res, err := g.Generate(ctx, topic)
+	res, err := g.GenerateAdjusted(ctx, topic, a)
 	if err != nil {
 		return Script{}, err
 	}
 	return Script{Title: res.Title, Body: res.Body}, nil
+}
+
+// Fingerprint implements Fingerprinter. A scripter that cannot be built has no
+// fingerprint, and then nothing is cached for it.
+func (s LLMScripter) Fingerprint() string {
+	g, err := script.New(s.Provider, s.Config)
+	if err != nil {
+		return ""
+	}
+	return g.Fingerprint()
 }

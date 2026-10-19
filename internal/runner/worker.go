@@ -3,9 +3,11 @@
 // It is the Sleepy worker (internal/jobs/worker.go) reduced to its skeleton:
 // claim a run, process exactly ONE step, release it, loop. Because the status
 // is the only memory, a run that dies in the middle resumes from the step it
-// was on. What Sleepy bolts onto this loop arrives later: the fix engine on
-// Day 7 and 8, guardrails on Day 9. Since Day 6 a step's output goes through a
-// QA gate before the run may advance.
+// was on. What Sleepy bolts onto this loop arrives later: the shadow reasoner
+// on Day 8, guardrails on Day 9. Since Day 6 a step's output goes through a QA
+// gate before the run may advance. Since Day 7 a rejection selects a directed
+// fix from the fix engine for the next attempt, and an accepted script is
+// cached by input hash so the same input is never paid for twice.
 //
 // New in this repo: before every step the worker asks an agent.Decider whether
 // it may go ahead. That is where the human approval gate lives.
@@ -22,6 +24,7 @@ import (
 	"sleepy-agent/internal/agent"
 	"sleepy-agent/internal/domain"
 	"sleepy-agent/internal/errs"
+	"sleepy-agent/internal/fix"
 	"sleepy-agent/internal/policy"
 	"sleepy-agent/internal/qa"
 	"sleepy-agent/internal/script"
@@ -80,6 +83,14 @@ type Config struct {
 	// minute episode. It must describe the same episode length the Scripter
 	// writes, or the gate judges against the wrong word limits.
 	Policy policy.Policy
+	// Fixes is the fix engine. With it, a gate rejection chooses a directed
+	// repair for the next attempt; without it (nil) the next attempt repeats
+	// the same request, which is the Day 6 behaviour and the baseline the fix
+	// engine is measured against.
+	Fixes *fix.Engine
+	// Cache keeps accepted scripts by input hash. Nil means no caching, and so
+	// does a Scripter that is not a Fingerprinter.
+	Cache ScriptCache
 	// Observer, if set, is called for every event. With several workers it is
 	// called from several goroutines, so it must be safe for concurrent use.
 	Observer func(Event)
@@ -87,11 +98,12 @@ type Config struct {
 
 // Worker claims runs and advances them one step at a time.
 type Worker struct {
-	store   Store
-	decider agent.Decider
-	cfg     Config
-	stages  map[domain.RunStatus]stage
-	gates   map[domain.RunStatus]gate
+	store    Store
+	decider  agent.Decider
+	cfg      Config
+	scripter Scripter
+	stages   map[domain.RunStatus]stage
+	gates    map[domain.RunStatus]gate
 }
 
 type stage struct {
@@ -139,11 +151,12 @@ func New(store Store, steps Steps, decider agent.Decider, cfg Config) (*Worker, 
 	if cfg.Policy.MaxWords == 0 {
 		cfg.Policy = policy.ForDuration(5)
 	}
-	return &Worker{store: store, decider: decider, cfg: cfg, stages: buildStages(steps), gates: buildGates(cfg.Policy)}, nil
+	return &Worker{store: store, decider: decider, cfg: cfg, scripter: steps.Scripter,
+		stages: buildStages(steps, cfg.Cache), gates: buildGates(cfg.Policy)}, nil
 }
 
 // buildStages maps a run's status to the step that runs while it sits there.
-func buildStages(s Steps) map[domain.RunStatus]stage {
+func buildStages(s Steps, cache ScriptCache) map[domain.RunStatus]stage {
 	need := func(r domain.Run, keys ...string) error {
 		for _, k := range keys {
 			if r.Outputs[k] == "" {
@@ -154,11 +167,32 @@ func buildStages(s Steps) map[domain.RunStatus]stage {
 	}
 	return map[domain.RunStatus]stage{
 		domain.StatusPending: {"script", func(ctx context.Context, r domain.Run) (map[string]string, error) {
+			out := func(sc Script, source string) map[string]string {
+				return map[string]string{domain.OutputTitle: sc.Title, domain.OutputScript: sc.Body, domain.OutputScriptSource: source}
+			}
+			// A fix is in play: the previous attempt was rejected and its output
+			// is still on the run, so the plan can build on it.
+			if fs, ok := readFixState(r.Outputs); ok {
+				if adj, ok := s.Scripter.(AdjustableScripter); ok {
+					sc, err := adj.ScriptAdjusted(ctx, r.Topic, fs.Plan.Adjust(r.Outputs[domain.OutputTitle], r.Outputs[domain.OutputScript]))
+					if err != nil {
+						return nil, err
+					}
+					return out(sc, domain.SourceModel), nil
+				}
+			}
+			// Same input as a script the gate already accepted: no model call. The
+			// gate still judges it, so a changed policy is not bypassed.
+			if key, ok := scriptCacheKey(s.Scripter, cache, r.Topic); ok {
+				if sc, hit, err := cache.Get(key); err == nil && hit {
+					return out(sc, domain.SourceCache), nil
+				}
+			}
 			sc, err := s.Scripter.Script(ctx, r.Topic)
 			if err != nil {
 				return nil, err
 			}
-			return map[string]string{domain.OutputTitle: sc.Title, domain.OutputScript: sc.Body}, nil
+			return out(sc, domain.SourceModel), nil
 		}},
 		domain.StatusScripted: {"voice", func(ctx context.Context, r domain.Run) (map[string]string, error) {
 			if err := need(r, domain.OutputScript); err != nil {
@@ -286,6 +320,7 @@ func (w *Worker) process(ctx context.Context, run domain.Run) error {
 			return err
 		}
 	}
+	var note string // what to add to the event when the run advances
 	// The output is stored before it is judged, so a human who gets a rejected
 	// run still sees exactly what was rejected. Nothing downstream reads it: the
 	// run stays in its status until the gate passes.
@@ -299,11 +334,30 @@ func (w *Worker) process(ctx context.Context, run domain.Run) error {
 			return err
 		}
 		if !report.Pass {
+			w.forgetRejectedScript(run, outputs)
 			return w.handleRejection(ctx, run, st, report)
+		}
+		applied, err := w.settleFix(ctx, run)
+		if err != nil {
+			return err
+		}
+		if applied != "" {
+			note = "qa passed after fix " + applied
+		}
+		if run.Status == domain.StatusPending {
+			if outputs[domain.OutputScriptSource] == domain.SourceCache {
+				note = "script served from cache, no model call"
+			} else {
+				w.rememberAcceptedScript(run, outputs)
+			}
 		}
 	}
 	next := domain.NextStatus(run.Status)
-	w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: next, Decision: agent.Act, Reason: d.Reason})
+	reason := d.Reason
+	if note != "" {
+		reason = strings.TrimSpace(reason + "; " + note)
+	}
+	w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: next, Decision: agent.Act, Reason: reason})
 	return w.store.UpdateRunStatus(ctx, run.ID, next)
 }
 
@@ -313,7 +367,8 @@ func (w *Worker) process(ctx context.Context, run domain.Run) error {
 //     status and retry, up to MaxAttempts, then park the run for a human. A
 //     truncation is retried because the output is stochastic and a model that
 //     was cut off once may finish the next time, the same way QA rejections are
-//     retried. The retry is the same request, a smarter one is Day 7;
+//     retried. The retry is the same request: the fix engine has no plan for
+//     these yet, and an attempt that fixed nothing keeps the plan it had;
 //   - anything else: the run is FAILED, no retry.
 func (w *Worker) handleFailure(ctx context.Context, run domain.Run, st stage, err error) error {
 	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
@@ -344,24 +399,135 @@ func (w *Worker) handleFailure(ctx context.Context, run domain.Run, st stage, er
 	return w.store.SetFailed(ctx, run.ID, msg)
 }
 
-// handleRejection applies the Day 6 policy to a gate that said no: the step
-// runs again, up to MaxAttempts failed attempts in a row (rejections and
-// errors count the same), then the run is parked for a human. The retry is the
-// same request. Feeding the reason back to the model is the Day 7 fix engine.
+// handleRejection applies the policy to a gate that said no: the step runs
+// again, up to MaxAttempts failed attempts in a row (rejections and errors
+// count the same), then the run is parked for a human.
+//
+// With a fix engine the next attempt is a directed repair chosen from the
+// report, not the same request: the plan that was just applied is scored on
+// whether it cured the failure it was chosen for, and the next untried plan for
+// the failure the gate reports now is stored on the run. Without an engine, or
+// when every plan for the failure was tried, the retry is the same request.
 func (w *Worker) handleRejection(ctx context.Context, run domain.Run, st stage, report qa.Report) error {
 	why := report.Summary()
 	n, err := w.store.RecordFailure(ctx, run.ID, fmt.Sprintf("%s: qa rejected: %s", st.name, why))
 	if err != nil {
 		return err
 	}
+	state, had := readFixState(run.Outputs)
+	if had && w.cfg.Fixes != nil {
+		w.cfg.Fixes.Record(fix.Outcome{PlanID: state.Plan.ID, Success: fix.Fixed(report, state.Plan.FailType), AttemptsToPass: n})
+	}
 	if n >= w.cfg.MaxAttempts {
 		reason := fmt.Sprintf("%s was rejected by QA %d times in a row, last: %s", st.name, n, why)
+		if len(state.Tried) > 0 {
+			reason += fmt.Sprintf(" (fixes tried: %s)", strings.Join(state.Tried, ", "))
+		}
 		w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: domain.StatusNeedsReview, Reason: reason, Err: errors.New(why)})
 		return w.store.SetNeedsReview(ctx, run.ID, reason)
+	}
+
+	if w.cfg.Fixes != nil && st.name == "script" {
+		if plan, ok := w.cfg.Fixes.Decide(report, state.Tried); ok {
+			next := fixState{Plan: plan, Tried: append(append([]string(nil), state.Tried...), plan.ID)}
+			b, err := json.Marshal(next)
+			if err != nil {
+				return fmt.Errorf("encode fix state: %w", err)
+			}
+			if err := w.store.SetOutput(ctx, run.ID, domain.OutputFixState, string(b)); err != nil {
+				return err
+			}
+			w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: run.Status,
+				Reason: fmt.Sprintf("qa rejected %d of %d, will retry with fix %s", n, w.cfg.MaxAttempts, plan.ID), Err: errors.New(why)})
+			return nil
+		}
+	}
+	// No plan: a plain retry, and the old plan is not applied again.
+	if had {
+		if err := w.store.SetOutput(ctx, run.ID, domain.OutputFixState, ""); err != nil {
+			return err
+		}
 	}
 	w.emit(Event{RunID: run.ID, Stage: st.name, From: run.Status, To: run.Status,
 		Reason: fmt.Sprintf("qa rejected %d of %d, will retry", n, w.cfg.MaxAttempts), Err: errors.New(why)})
 	return nil
+}
+
+// fixState is what the worker remembers about the fix engine on a run. It
+// lives in the run's outputs, so a crashed worker's successor still knows which
+// plans were tried.
+type fixState struct {
+	Plan  fix.Plan `json:"plan"`  // applied to the attempt that is about to run, or has just run
+	Tried []string `json:"tried"` // every plan applied to this run, in order
+}
+
+// readFixState reads the run's fix state. An empty or unreadable value means
+// no fix is in play.
+func readFixState(outputs map[string]string) (fixState, bool) {
+	raw := outputs[domain.OutputFixState]
+	if raw == "" {
+		return fixState{}, false
+	}
+	var fs fixState
+	if err := json.Unmarshal([]byte(raw), &fs); err != nil || fs.Plan.ID == "" {
+		return fixState{}, false
+	}
+	return fs, true
+}
+
+// settleFix runs when the gate passes. If a fix was applied to this attempt it
+// is credited, and the fix state is cleared. It returns the ID of the plan that
+// was applied, "" when none.
+func (w *Worker) settleFix(ctx context.Context, run domain.Run) (string, error) {
+	state, had := readFixState(run.Outputs)
+	if !had {
+		return "", nil
+	}
+	if w.cfg.Fixes != nil {
+		w.cfg.Fixes.Record(fix.Outcome{PlanID: state.Plan.ID, Success: true, AttemptsToPass: run.FailedAttempts + 1})
+	}
+	return state.Plan.ID, w.store.SetOutput(ctx, run.ID, domain.OutputFixState, "")
+}
+
+// scriptCacheKey is the input hash of a topic for this scripter. It reports
+// false when there is no cache or the scripter cannot say what it is.
+func scriptCacheKey(sc Scripter, cache ScriptCache, topic string) (string, bool) {
+	if cache == nil {
+		return "", false
+	}
+	fp, ok := sc.(Fingerprinter)
+	if !ok {
+		return "", false
+	}
+	f := fp.Fingerprint()
+	if f == "" {
+		return "", false
+	}
+	return CacheKey(f, topic), true
+}
+
+// rememberAcceptedScript caches a script the gate accepted. Best effort: a
+// cache that cannot write only costs a model call next time.
+func (w *Worker) rememberAcceptedScript(run domain.Run, outputs map[string]string) {
+	key, ok := scriptCacheKey(w.scripter, w.cfg.Cache, run.Topic)
+	if !ok {
+		return
+	}
+	if err := w.cfg.Cache.Put(key, Script{Title: outputs[domain.OutputTitle], Body: outputs[domain.OutputScript]}); err != nil {
+		w.emit(Event{RunID: run.ID, Stage: "script", From: run.Status, To: run.Status, Reason: "could not write the script cache", Err: err})
+	}
+}
+
+// forgetRejectedScript evicts a cached script the gate no longer accepts, for
+// example after the policy changed. Otherwise every retry would be served the
+// same rejected script.
+func (w *Worker) forgetRejectedScript(run domain.Run, outputs map[string]string) {
+	if run.Status != domain.StatusPending || outputs[domain.OutputScriptSource] != domain.SourceCache {
+		return
+	}
+	if key, ok := scriptCacheKey(w.scripter, w.cfg.Cache, run.Topic); ok {
+		_ = w.cfg.Cache.Delete(key) //nolint:errcheck // best effort, a stale entry is rejected again and evicted again
+	}
 }
 
 func (w *Worker) emit(e Event) {
