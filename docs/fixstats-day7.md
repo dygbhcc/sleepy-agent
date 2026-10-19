@@ -20,3 +20,19 @@ The arms draw separate first attempts. They never saw the same failure, so this 
 
 - That a directed fix beats a blind retry. Blind recovered 3 of 3 as well.
 - Why the directed arm had 3 truncations in 8 and the blind arm 0 in 8. N is too small to say.
+
+# Paired test (2026-10-19)
+
+Command: `GROQ_MODEL=openai/gpt-oss-120b REASONING_EFFORT=low MAX_TOKENS=4000 RUNS=16 TRIALS=3 PAIRED=1 make fixstats`
+Same model and settings as above. 16 first attempts: 11 accepted at once, 2 truncated, 3 rejected by the gate (all `WORDCOUNT_LOW`). From each rejected script, 3 blind retries (the same request again) and 3 directed fixes (`wc_low_continue`), one attempt each.
+
+| starting point | words | blind: passed | directed: passed |
+|---|---|---|---|
+| Velvet Meadow | 468 | 1/3 | 3/3 |
+| Moss and Still Water | 496 | 1/3 | 3/3 |
+| A Lighthouse at Dusk | 459 | 2/3 | 3/3 |
+| total | | 4/9 | 9/9 |
+
+Blind attempts that failed wrote 448 to 490 words (minimum 500); one was truncated. Directed attempts passed at 627 to 711 words.
+
+Limits: 3 starting points, so the 9 trials per arm are not 9 independent samples. One model, one setting, one failure type. A continuation raises the word count by construction, so for a length failure this is close to the expected result. The gate does not judge whether the appended text is good. Cost per attempt was not measured here.

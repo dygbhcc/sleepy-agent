@@ -76,3 +76,59 @@ func TestOneLine(t *testing.T) {
 		t.Errorf("len = %d", len(got))
 	}
 }
+
+func TestPairedStartsFromTheSameRejectedScript(t *testing.T) {
+	var out bytes.Buffer
+	cfg := script.Config{Style: "Earthside", DurationMin: 5}
+	r, err := paired(context.Background(), &out, shortWriter{}, cfg, 2, 3, 0, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.firstAttempts != 2 || r.accepted != 0 || len(r.starts) != 2 {
+		t.Fatalf("%+v", r)
+	}
+	for _, s := range r.starts {
+		if s.failType != "WORDCOUNT_LOW" || s.plan.ID != "wc_low_continue" {
+			t.Errorf("start %+v", s)
+		}
+		if got := count(s.blind, func(x trial) bool { return x.pass }); got != 0 {
+			t.Errorf("blind retries of a model that always writes 10 words passed %d times", got)
+		}
+		if got := count(s.directed, func(x trial) bool { return x.pass }); got != 3 {
+			t.Errorf("directed passed %d of 3", got)
+		}
+	}
+	var rep bytes.Buffer
+	pairedReport(&rep, r, "scripted mock", 3)
+	for _, want := range []string{"| **total** | | | | **0/6** | **6/6** |", "from 2 failing scripts", "real sample size"} {
+		if !strings.Contains(rep.String(), want) {
+			t.Errorf("report misses %q:\n%s", want, rep.String())
+		}
+	}
+}
+
+type allGood struct{}
+
+func (allGood) Name() string { return "good" }
+func (allGood) Complete(_ context.Context, req llm.Request) (llm.Response, error) {
+	if strings.Contains(req.Messages[0].Content, "episode name") {
+		return llm.Response{Content: "Velvet Meadow"}, nil
+	}
+	return llm.Response{Content: script.SampleScript(12)}, nil
+}
+
+func TestPairedWithNothingToRepairSaysSo(t *testing.T) {
+	var out bytes.Buffer
+	r, err := paired(context.Background(), &out, allGood{}, script.Config{Style: "Earthside", DurationMin: 5}, 2, 3, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.accepted != 2 || len(r.starts) != 0 {
+		t.Fatalf("%+v", r)
+	}
+	var rep bytes.Buffer
+	pairedReport(&rep, r, "m", 3)
+	if !strings.Contains(rep.String(), "nothing was compared") {
+		t.Errorf("report:\n%s", rep.String())
+	}
+}

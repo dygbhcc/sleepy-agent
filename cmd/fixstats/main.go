@@ -22,6 +22,10 @@
 // DURATION, STYLE and SCRIPT_PAUSE_SECONDS work as in cmd/scriptstats, RUNS is
 // the number of topics.
 //
+// PAIRED=1 runs the paired test instead (paired.go): from each script the gate
+// rejects, TRIALS blind retries against TRIALS directed fixes, one attempt each.
+// RUNS is then the number of first attempts to try, not the number of topics.
+//
 // Every run is written to out/fixstats/ with its attempts and final script.
 package main
 
@@ -410,6 +414,18 @@ func main() {
 	}
 	cfg := script.Config{Style: style, DurationMin: duration, MaxTokensPerChunk: envInt("MAX_TOKENS", 0, 0, 32000)}
 	build, label, pause := source()
+
+	if os.Getenv("PAIRED") != "" {
+		trials := envInt("TRIALS", 3, 1, 10)
+		fmt.Printf("paired test, model: %s, style %s, %d minute episodes, up to %d first attempts, %d trials per arm\npause between calls: %s\n\n", label, style, duration, runs, trials, pause)
+		r, err := paired(context.Background(), os.Stdout, build(), cfg, runs, trials, pause, filepath.Join("out", "fixstats"))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed:", err)
+			os.Exit(1)
+		}
+		pairedReport(os.Stdout, r, label, trials)
+		return
+	}
 
 	fmt.Printf("model: %s, style %s, %d minute episodes, %d topics, two arms each\npause between runs: %s\n\n", label, style, duration, runs, pause)
 	rs, engine, err := experiment(context.Background(), os.Stdout, build, cfg, runs, maxAttempts, pause, filepath.Join("out", "fixstats"))

@@ -27,7 +27,7 @@ Needs Go 1.23 or newer. No API key, no network.
 make skeleton # one mock episode through the state machine: the QA gate rejects a short script once, publish waits for approval
 make demo     # the agent loop; scripted mock, or a real model if GROQ_API_KEY and GROQ_MODEL are set
 make script   # generate scripts with the ported generator, measure the raw failure rate and what the QA gate would say (needs GROQ_API_KEY and GROQ_MODEL for a real result; MAX_TOKENS and REASONING_EFFORT low|medium|high, for gpt-oss, change the token budget and reasoning)
-make fixstats # blind retry vs directed fix on the same topics, per failure (needs GROQ_API_KEY and GROQ_MODEL for a real result; same MAX_TOKENS and REASONING_EFFORT settings as make script)
+make fixstats # blind retry vs directed fix on the same topics, per failure (needs GROQ_API_KEY and GROQ_MODEL for a real result; same MAX_TOKENS and REASONING_EFFORT settings as make script; PAIRED=1 starts from the same rejected script for both strategies, TRIALS sets the trials per arm)
 make compare  # native vs prompt based tool calling, N runs each (needs GROQ_API_KEY and GROQ_MODEL for a real result)
 make test     # tests with the race detector
 make lint     # gofmt and go vet
@@ -99,9 +99,11 @@ Design rules the code follows:
   Accepted scripts are cached per topic, model and prompt version. Measured on
   Day 7 (`make fixstats`, `openai/gpt-oss-120b`, reasoning low, 4000 tokens, 8
   topics per arm): a plain retry recovered 3 of 3 `WORDCOUNT_LOW` first
-  attempts (440, 472 and 485 words against a 500 minimum), so the directed fix
-  showed no advantage in this sample, and the two arms did not see the same
-  failures. Voice, render and package have no gate yet, they arrive with the
+  attempts (440, 472 and 485 words against a 500 minimum), so that sample showed
+  no advantage for the directed fix. A paired test from the same 3 rejected
+  scripts (459, 468 and 496 words), one attempt each: a blind retry passed 4 of
+  9, a directed continuation 9 of 9 (3 starting points, one model, length
+  failures only; `docs/fixstats-day7.md`). Voice, render and package have no gate yet, they arrive with the
   real adapters. `Measure` (the prompt's strict rules) and the gate
   (production thresholds) are separate on purpose: a script can be clean for
   `Measure` and still be rejected.
