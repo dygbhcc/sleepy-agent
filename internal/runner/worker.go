@@ -91,6 +91,12 @@ type Config struct {
 	// Cache keeps accepted scripts by input hash. Nil means no caching, and so
 	// does a Scripter that is not a Fingerprinter.
 	Cache ScriptCache
+	// Shadow reviews every script the gate accepts and records its verdict in
+	// the run. It has no power: a verdict, an error or a timeout never changes
+	// what the run does next. Nil means no review.
+	Shadow Reviewer
+	// ShadowTimeout bounds one review; 0 means 2 minutes.
+	ShadowTimeout time.Duration
 	// Observer, if set, is called for every event. With several workers it is
 	// called from several goroutines, so it must be safe for concurrent use.
 	Observer func(Event)
@@ -345,8 +351,11 @@ func (w *Worker) process(ctx context.Context, run domain.Run) error {
 			note = "qa passed after fix " + applied
 		}
 		if run.Status == domain.StatusPending {
+			if msg := w.shadowReview(ctx, run, outputs); msg != "" {
+				note = joinNotes(note, msg)
+			}
 			if outputs[domain.OutputScriptSource] == domain.SourceCache {
-				note = "script served from cache, no model call"
+				note = joinNotes(note, "script served from cache, no model call")
 			} else {
 				w.rememberAcceptedScript(run, outputs)
 			}
@@ -528,6 +537,54 @@ func (w *Worker) forgetRejectedScript(run domain.Run, outputs map[string]string)
 	if key, ok := scriptCacheKey(w.scripter, w.cfg.Cache, run.Topic); ok {
 		_ = w.cfg.Cache.Delete(key) //nolint:errcheck // best effort, a stale entry is rejected again and evicted again
 	}
+}
+
+// shadowReview asks the shadow reviewer about an accepted script and records
+// the verdict. It returns a short note for the event, empty when there is no
+// reviewer. Nothing it does can fail the step: a review that errors or times
+// out is reported in the note and the run goes on exactly as it would have.
+// A script served from the cache is not reviewed again: it was reviewed, if a
+// reviewer was set, when the model wrote it.
+func (w *Worker) shadowReview(ctx context.Context, run domain.Run, outputs map[string]string) string {
+	if w.cfg.Shadow == nil || outputs[domain.OutputScriptSource] == domain.SourceCache {
+		return ""
+	}
+	timeout := w.cfg.ShadowTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	v, err := w.cfg.Shadow.Review(rctx, run.Topic, outputs[domain.OutputTitle], outputs[domain.OutputScript])
+	if err != nil {
+		return "shadow review failed: " + oneLine(err.Error())
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "shadow review not recorded: " + oneLine(err.Error())
+	}
+	if err := w.store.SetOutput(ctx, run.ID, domain.OutputShadowVerdict, string(b)); err != nil {
+		return "shadow review not recorded: " + oneLine(err.Error())
+	}
+	if v.Pass {
+		return fmt.Sprintf("shadow review: pass (calm %d, coherence %d, variety %d)", v.Calm, v.Coherence, v.Variety)
+	}
+	return fmt.Sprintf("shadow review: would reject (calm %d, coherence %d, variety %d): %s", v.Calm, v.Coherence, v.Variety, oneLine(v.Reason))
+}
+
+func joinNotes(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "; " + b
+}
+
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 160 {
+		s = s[:160] + "..."
+	}
+	return s
 }
 
 func (w *Worker) emit(e Event) {

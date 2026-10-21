@@ -14,7 +14,7 @@ These rules apply to every contributor and every AI assistant working in this re
 
 - `internal/agent`: agent loop, tools, `Decider`. `internal/llm`: `Provider`, mock, Groq client, and the two tool calling adapters (native in `OpenAICompat`, `PromptTools` for the rest). The agent only sees `llm.ToolCall`, never a model specific format.
 - `internal/domain`, `internal/runner`, `internal/store`: the run state machine, worker loop and storage.
-- `internal/script`: script generator ported from Sleepy plus `Measure` (strict prompt rules, counts only). `internal/qa`: the script QA gate (Sleepy's production thresholds, pass or fail with reasons, repairs nothing). `internal/fix`: the fix engine (catalog keyed by failure code, scorer, repair notes). `internal/runner/cache.go`: script cache. `cmd/`: demos and `fixstats`.
+- `internal/script`: script generator ported from Sleepy plus `Measure` (strict prompt rules, counts only). `internal/qa`: the script QA gate (Sleepy's production thresholds, pass or fail with reasons, repairs nothing). `internal/fix`: the fix engine (catalog keyed by failure code, scorer, repair notes). `internal/runner/cache.go`: script cache. `internal/eval`: quality metrics the gate does not check (measure only). `internal/judge`: the shadow judge (records a verdict, never acts). `cmd/`: demos, `fixstats`, `evalstats`.
 
 ## Conventions
 

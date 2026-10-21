@@ -101,6 +101,12 @@ var imagerySets = map[string][]string{
 	},
 }
 
+// ImageryLines returns the imagery lines the prompt gives the model for a
+// style, or nil for an unknown style. The slice is a copy.
+func ImageryLines(style string) []string {
+	return append([]string(nil), imagerySets[style]...)
+}
+
 type chunkData struct {
 	ParagraphCount   int
 	IsFirstChunk     bool

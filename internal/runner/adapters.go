@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"sleepy-agent/internal/judge"
 
 	"sleepy-agent/internal/llm"
 	"sleepy-agent/internal/script"
@@ -15,6 +16,12 @@ import (
 type Script struct {
 	Title string
 	Body  string
+}
+
+// Reviewer is a shadow reviewer: it scores an accepted script and has no power
+// over the run. internal/judge.Judge implements it.
+type Reviewer interface {
+	Review(ctx context.Context, topic, title, body string) (judge.Verdict, error)
 }
 
 // Scripter writes the episode script for a topic.

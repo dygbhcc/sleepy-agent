@@ -181,3 +181,13 @@ func isAllCaps(w string) bool {
 	}
 	return letters >= 2
 }
+
+// Sentences splits a script into sentences the way Measure does: by paragraph,
+// at ., ! and ? followed by a space or the end.
+func Sentences(text string) []string {
+	var out []string
+	for _, para := range splitParagraphs(text) {
+		out = append(out, sentences(para)...)
+	}
+	return out
+}

@@ -1,4 +1,4 @@
-.PHONY: test lint demo skeleton compare script fixstats
+.PHONY: test lint demo skeleton compare script fixstats evalstats
 
 test:
 	go test -race ./...
@@ -21,3 +21,6 @@ script:
 
 fixstats:
 	go run ./cmd/fixstats
+
+evalstats:
+	go run ./cmd/evalstats

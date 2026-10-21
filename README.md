@@ -11,13 +11,14 @@ running example is an automated episode pipeline: a topic goes in, an
 episode (title, script, later narration and video) comes out, with quality
 gates, self-healing and human approval where it matters.
 
-> Status: **Day 7 of 11.** The state machine and worker loop are ported from
+> Status: **Day 8 of 11.** The state machine and worker loop are ported from
 > Sleepy, and a walking skeleton runs a mock episode end to end. Scripts come
 > from the ported Sleepy generator and pass a QA gate before the run may
 > advance: a rejected script gets a fix chosen by its failure code (a
 > continuation for a short script, a repair note naming banned words), then is
 > parked for a human. A script already accepted for the same topic and settings
-> is served from a cache. Publishing waits for a human.
+> is served from a cache. A shadow judge can score accepted scripts without
+> any power over the run. Publishing waits for a human.
 
 ## Run it
 
@@ -28,6 +29,7 @@ make skeleton # one mock episode through the state machine: the QA gate rejects 
 make demo     # the agent loop; scripted mock, or a real model if GROQ_API_KEY and GROQ_MODEL are set
 make script   # generate scripts with the ported generator, measure the raw failure rate and what the QA gate would say (needs GROQ_API_KEY and GROQ_MODEL for a real result; MAX_TOKENS and REASONING_EFFORT low|medium|high, for gpt-oss, change the token budget and reasoning)
 make fixstats # blind retry vs directed fix on the same topics, per failure (needs GROQ_API_KEY and GROQ_MODEL for a real result; same MAX_TOKENS and REASONING_EFFORT settings as make script; PAIRED=1 starts from the same rejected script for both strategies, TRIALS sets the trials per arm)
+make evalstats # measure saved scripts (out/fixstats by default) for what the QA gate does not see: copied prompt lines, repeated phrases, recycled continuations; JUDGE=1 adds the shadow judge, LABELS=file compares both with your good or bad labels
 make compare  # native vs prompt based tool calling, N runs each (needs GROQ_API_KEY and GROQ_MODEL for a real result)
 make test     # tests with the race detector
 make lint     # gofmt and go vet
@@ -83,12 +85,14 @@ Design rules the code follows:
 | `internal/domain` | Run model and the status chain | ported |
 | `internal/runner` | Worker loop, QA gate and approval gate, adapter interfaces and mocks | ported, reduced |
 | `internal/fix` | Fix engine: a catalog of fixes keyed by failure code, a scorer that learns which fix works, repair notes built from the QA report | ported, changed |
+| `internal/eval` | Quality metrics beyond the gate (sentence shape, repeated phrases, copied prompt lines, what a continuation adds). Measures, never rejects | new |
+| `internal/judge` | The shadow judge: a model scores an accepted script 1 to 5 on calm, coherence and variety; recorded in the run, never acted on | new |
 | `internal/qa` | The script QA gate: word count, banned phrases, sleep safety, title. Says pass or fail and why, repairs nothing | ported |
 | `internal/store` | Run storage: memory or JSON file | new (Sleepy uses Postgres) |
 | `internal/policy`, `internal/errs` | Duration limits, transient error type | ported |
 | `internal/script` | Script generator ported from Sleepy (chunked, same prompts) and `Measure`, which counts broken prompt rules without judging | ported |
 | `internal/scenario` | The one task `demo` and `compare` share, so both measure the same thing | new |
-| `cmd/demo`, `cmd/skeleton`, `cmd/compare`, `cmd/scriptstats`, `cmd/fixstats` | The agent loop demo, the walking skeleton, the adapter comparison, the script failure rate, blind retry vs directed fix | new |
+| `cmd/demo`, `cmd/skeleton`, `cmd/compare`, `cmd/scriptstats`, `cmd/fixstats`, `cmd/evalstats` | The agent loop demo, the walking skeleton, the adapter comparison, the script failure rate, blind retry vs directed fix, the metrics the gate lacks | new |
 
 ## Known limits (measured, see FAILURE_LOG.md)
 

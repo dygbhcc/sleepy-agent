@@ -59,6 +59,9 @@ const (
 	// OutputScriptSource says where the script came from: SourceModel or
 	// SourceCache. It is kept so a reviewer can tell a cached script from a fresh one.
 	OutputScriptSource = "script_source"
+	// OutputShadowVerdict is the shadow judge's verdict on the accepted script, as
+	// JSON. It is recorded and never acted on.
+	OutputShadowVerdict = "shadow_verdict"
 )
 
 // Values of OutputScriptSource.
