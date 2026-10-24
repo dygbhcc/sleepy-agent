@@ -10,6 +10,11 @@ type Run struct {
 	ID    string
 	Topic string
 
+	// Style is the run's own look and imagery: Cosmos, Earthside or Myth.
+	// Empty means the scripter's default. In Sleepy the user sets it when the
+	// run is created and the background image follows it.
+	Style string
+
 	Status RunStatus
 
 	// Outputs holds what each step produced: a title, a script, file references.

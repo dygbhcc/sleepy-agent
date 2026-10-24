@@ -47,6 +47,7 @@ var topics = []string{
 }
 
 type summary struct {
+	dir                            string // where the scripts and prompt logs were written
 	runs, errors, generated, clean int
 	gatePass                       int
 	gateFails                      map[qa.FailType]int
@@ -60,37 +61,55 @@ type summary struct {
 func main() {
 	runs := envInt("RUNS", 5, 1, 50)
 	duration := envInt("DURATION", 5, 1, 60)
-	style := os.Getenv("STYLE")
-	if style == "" {
-		style = "Earthside"
-	}
+	forcedStyle = os.Getenv("STYLE")
+	style := forcedStyle // empty: every topic gets its own style
 
 	maxTokens := envInt("MAX_TOKENS", 0, 0, 32000)
 	build, label := source()
 	cfg := config(style, duration, maxTokens)
-	fmt.Printf("model: %s, style %s, %d minute episodes, %d runs\n", label, style, duration, runs)
+	imageryMode := os.Getenv("IMAGERY")
+	if imageryMode == "" {
+		imageryMode = script.ImageryStock
+	}
+	fmt.Printf("model: %s, style %s, imagery %s, %d minute episodes, %d runs\n", label, style, imageryMode, duration, runs)
 	if maxTokens > 0 {
 		fmt.Printf("max tokens per chunk: %d (generator default is used when MAX_TOKENS is not set)\n", maxTokens)
 	}
 	fmt.Printf("pause between runs: %s\n\n", pause())
 
 	sum := summary{runs: runs, violations: map[string]int{}, gateFails: map[qa.FailType]int{}}
-	outDir := filepath.Join("out", "scriptstats")
-	_ = os.MkdirAll(outDir, 0o755)
+	dir := outDir(label)
+	if d := os.Getenv("OUT_DIR"); d != "" {
+		dir = d // a named folder keeps one round from overwriting another
+	}
+	sum.dir = dir
+	_ = os.MkdirAll(dir, 0o755)
 
+	var logs []*os.File
+	defer func() {
+		for _, f := range logs {
+			_ = f.Close()
+		}
+	}()
 	for i := 1; i <= runs; i++ {
 		if i > 1 {
 			time.Sleep(pause())
 		}
 		topic := topics[(i-1)%len(topics)]
-		p := build(i, &sum.retries)
+		var p llm.Provider = build(i, &sum.retries)
+		// Everything sent to the model, kept next to the script it produced.
+		// The .txt ending keeps it out of evalstats, which reads *.md.
+		if lf, err := os.Create(filepath.Join(dir, fmt.Sprintf("run-%d.prompts.txt", i))); err == nil {
+			p = &llm.Logged{Inner: p, W: lf}
+			logs = append(logs, lf)
+		}
 		g, err := script.New(p, cfg)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		res, err := g.Generate(ctx, topic)
+		res, err := g.GenerateAdjusted(ctx, topic, script.Adjust{Style: styleFor(topic)})
 		cancel()
 
 		sum.prompt += res.Usage.PromptTokens
@@ -135,7 +154,7 @@ func main() {
 		if len(rep.BannedFound) > 0 {
 			fmt.Printf("        banned words used: %s\n", strings.Join(rep.BannedFound, ", "))
 		}
-		save(outDir, i, topic, res)
+		save(dir, i, topic, res)
 	}
 	print(sum, cfg)
 }
@@ -190,12 +209,12 @@ func print(s summary, cfg script.Config) {
 		fmt.Printf("\nfirst error: %s\n", s.firstErr)
 	}
 	limits := policy.ForDuration(cfg.DurationMin)
-	fmt.Printf("\nword limits for %d minutes: %d to %d. Scripts are in out/scriptstats/.\n",
-		cfg.DurationMin, limits.MinWords, limits.MaxWords)
+	fmt.Printf("\nword limits for %d minutes: %d to %d. Scripts and the prompts sent for them are in %s/.\n",
+		cfg.DurationMin, limits.MinWords, limits.MaxWords, s.dir)
 }
 
 func save(dir string, i int, topic string, res script.Result) {
-	body := fmt.Sprintf("title: %s\ntopic: %s\n\n%s\n", res.Title, topic, res.Body)
+	body := fmt.Sprintf("title: %s\ntopic: %s\nstyle: %s\n\n%s\n", res.Title, topic, styleFor(topic), res.Body)
 	_ = os.WriteFile(filepath.Join(dir, fmt.Sprintf("run-%d.md", i)), []byte(body), 0o644)
 }
 
@@ -204,7 +223,7 @@ func source() (func(run int, retries *int) llm.Provider, string) {
 	key := os.Getenv("GROQ_API_KEY")
 	if key == "" {
 		fmt.Fprintln(os.Stderr, "GROQ_API_KEY not set: running scripted mocks. This only proves the harness works, it measures no model.")
-		return mockFor, "scripted mock"
+		return mockFor, mockLabel
 	}
 	model := os.Getenv("GROQ_MODEL")
 	if model == "" {
@@ -248,7 +267,7 @@ func mockFor(run int, _ *int) llm.Provider {
 // config is the generator setup for a run. A zero maxTokens keeps the
 // generator's own default budget per chunk.
 func config(style string, duration, maxTokens int) script.Config {
-	return script.Config{Style: style, DurationMin: duration, MaxTokensPerChunk: maxTokens}
+	return script.Config{Style: style, DurationMin: duration, MaxTokensPerChunk: maxTokens, Imagery: os.Getenv("IMAGERY")}
 }
 
 func pause() time.Duration {

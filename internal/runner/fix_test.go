@@ -674,3 +674,51 @@ func TestWhenNoPlanIsLeftTheOldPlanIsDroppedAndTheRetryIsPlain(t *testing.T) {
 		t.Errorf("the plain retry must not carry a repair note:\n%s", last)
 	}
 }
+
+// ---- per-run style
+
+func TestARunsStyleReachesThePromptOnTheFirstAttemptAndOnAFix(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory(nil)
+	sc, m := llmScripter(shortScript, "Soft Lake", okScript(), "Soft Lake")
+	w, _ := build(t, st, sc, runner.Config{Fixes: fix.NewEngine()})
+	run, _ := st.CreateRunStyled(ctx, "Rings of Saturn", "Cosmos")
+
+	drain(t, w)
+
+	if got := mustRun(t, st, run.ID); got.Status != domain.StatusDone || got.Style != "Cosmos" {
+		t.Fatalf("%s style %q (%s)", got.Status, got.Style, got.LastError)
+	}
+	n := 0
+	for _, r := range m.Requests() {
+		if strings.Contains(r.Messages[0].Content, "Zero exclamation marks") { // a script call, not a title call
+			n++
+			if !strings.Contains(r.Messages[1].Content, "1. Soft starlight") {
+				t.Fatalf("a script call without the Cosmos imagery: %q", r.Messages[1].Content)
+			}
+		}
+	}
+	if n < 2 {
+		t.Fatalf("saw %d script calls, want the first attempt and the fix", n)
+	}
+}
+
+func TestTheScriptCacheSeparatesStyles(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory(nil)
+	cache := runner.NewMemoryCache()
+	sc, m := llmScripter(okScript(), "Soft Lake", okScript(), "Soft Lake")
+	w, _ := build(t, st, sc, runner.Config{Cache: cache})
+	_, _ = st.CreateRunStyled(ctx, "same topic", "Cosmos")
+	drain(t, w)
+	_, _ = st.CreateRunStyled(ctx, "same topic", "Myth")
+	drain(t, w)
+	if n := len(m.Requests()); n != 4 {
+		t.Fatalf("a different style is a different question, want 4 model calls, got %d", n)
+	}
+	_, _ = st.CreateRunStyled(ctx, "same topic", "Cosmos")
+	drain(t, w)
+	if n := len(m.Requests()); n != 4 {
+		t.Fatalf("the same topic and style again must be served from the cache, got %d calls", n)
+	}
+}

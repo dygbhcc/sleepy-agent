@@ -180,7 +180,9 @@ func buildStages(s Steps, cache ScriptCache) map[domain.RunStatus]stage {
 			// is still on the run, so the plan can build on it.
 			if fs, ok := readFixState(r.Outputs); ok {
 				if adj, ok := s.Scripter.(AdjustableScripter); ok {
-					sc, err := adj.ScriptAdjusted(ctx, r.Topic, fs.Plan.Adjust(r.Outputs[domain.OutputTitle], r.Outputs[domain.OutputScript]))
+					a := fs.Plan.Adjust(r.Outputs[domain.OutputTitle], r.Outputs[domain.OutputScript])
+					a.Style = r.Style
+					sc, err := adj.ScriptAdjusted(ctx, r.Topic, a)
 					if err != nil {
 						return nil, err
 					}
@@ -189,12 +191,18 @@ func buildStages(s Steps, cache ScriptCache) map[domain.RunStatus]stage {
 			}
 			// Same input as a script the gate already accepted: no model call. The
 			// gate still judges it, so a changed policy is not bypassed.
-			if key, ok := scriptCacheKey(s.Scripter, cache, r.Topic); ok {
+			if key, ok := scriptCacheKey(s.Scripter, cache, r.Topic, r.Style); ok {
 				if sc, hit, err := cache.Get(key); err == nil && hit {
 					return out(sc, domain.SourceCache), nil
 				}
 			}
-			sc, err := s.Scripter.Script(ctx, r.Topic)
+			var sc Script
+			var err error
+			if adj, ok := s.Scripter.(AdjustableScripter); ok {
+				sc, err = adj.ScriptAdjusted(ctx, r.Topic, script.Adjust{Style: r.Style})
+			} else {
+				sc, err = s.Scripter.Script(ctx, r.Topic)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -500,7 +508,7 @@ func (w *Worker) settleFix(ctx context.Context, run domain.Run) (string, error) 
 
 // scriptCacheKey is the input hash of a topic for this scripter. It reports
 // false when there is no cache or the scripter cannot say what it is.
-func scriptCacheKey(sc Scripter, cache ScriptCache, topic string) (string, bool) {
+func scriptCacheKey(sc Scripter, cache ScriptCache, topic, style string) (string, bool) {
 	if cache == nil {
 		return "", false
 	}
@@ -512,13 +520,16 @@ func scriptCacheKey(sc Scripter, cache ScriptCache, topic string) (string, bool)
 	if f == "" {
 		return "", false
 	}
+	if style != "" {
+		f += "|style=" + style // a run's own style changes what is asked
+	}
 	return CacheKey(f, topic), true
 }
 
 // rememberAcceptedScript caches a script the gate accepted. Best effort: a
 // cache that cannot write only costs a model call next time.
 func (w *Worker) rememberAcceptedScript(run domain.Run, outputs map[string]string) {
-	key, ok := scriptCacheKey(w.scripter, w.cfg.Cache, run.Topic)
+	key, ok := scriptCacheKey(w.scripter, w.cfg.Cache, run.Topic, run.Style)
 	if !ok {
 		return
 	}
@@ -534,7 +545,7 @@ func (w *Worker) forgetRejectedScript(run domain.Run, outputs map[string]string)
 	if run.Status != domain.StatusPending || outputs[domain.OutputScriptSource] != domain.SourceCache {
 		return
 	}
-	if key, ok := scriptCacheKey(w.scripter, w.cfg.Cache, run.Topic); ok {
+	if key, ok := scriptCacheKey(w.scripter, w.cfg.Cache, run.Topic, run.Style); ok {
 		_ = w.cfg.Cache.Delete(key) //nolint:errcheck // best effort, a stale entry is rejected again and evicted again
 	}
 }

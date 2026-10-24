@@ -265,3 +265,21 @@ func TestNewRejectsBadConfig(t *testing.T) {
 		t.Fatal("empty topic")
 	}
 }
+
+func TestTitleCallIsNotCappedAtAHundredTokensAndTruncationFallsBack(t *testing.T) {
+	m := llm.NewMockResponses(
+		llm.Response{Content: cleanScript(12), FinishReason: "stop"},
+		llm.Response{Content: "Half a", FinishReason: "length", ReasoningTokens: 98},
+	)
+	res, err := gen(t, m, Config{MaxTokensPerChunk: 4000}).Generate(context.Background(), "A Lighthouse")
+	if err != nil {
+		t.Fatalf("a truncated title must not lose the script: %v", err)
+	}
+	if !res.TitleFallback || res.Title != "A Lighthouse" {
+		t.Fatalf("want the topic as flagged fallback, got %q fallback=%v", res.Title, res.TitleFallback)
+	}
+	reqs := m.Requests()
+	if got := reqs[len(reqs)-1].MaxTokens; got != 4000 {
+		t.Fatalf("title MaxTokens = %d, want the configured 4000", got)
+	}
+}

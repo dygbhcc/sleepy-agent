@@ -62,6 +62,13 @@ var styleGuides = map[string]string{
 		"soft lantern light, timeless quiet villages, dreaming mountains.",
 }
 
+// styleMoods is the style described by mood alone, with no places or objects.
+var styleMoods = map[string]string{
+	"Cosmos":    "A spacious, cosmic mood: wide, slow and silent.",
+	"Earthside": "A natural, earthly mood: soft, close and unhurried.",
+	"Myth":      "A storybook, mythical mood: old, gentle and dreamlike.",
+}
+
 var imagerySets = map[string][]string{
 	"Cosmos": {
 		"Soft starlight on distant dust.",
@@ -101,6 +108,22 @@ var imagerySets = map[string][]string{
 	},
 }
 
+// imageryAnchors is the one word that stands for each imagery line, in the
+// same order as imagerySets. They let a measure see a script that walks through
+// the whole list in its own words, which a search for the lines themselves
+// cannot.
+var imageryAnchors = map[string][]string{
+	"Cosmos":    {"starlight", "orbit", "nebula", "atmospher", "ring", "suns", "constellation", "cosmic", "gradient", "dim"},
+	"Earthside": {"dew", "lake", "moss", "river", "rain", "firefl", "fog", "moonlight", "birch", "snow"},
+	"Myth":      {"lantern", "dragon", "librar", "village", "lullaby", "giant", "well", "chime", "tapestr", "bridge"},
+}
+
+// ImageryAnchors returns the anchor word of each imagery line of a style, or
+// nil for an unknown style. The slice is a copy.
+func ImageryAnchors(style string) []string {
+	return append([]string(nil), imageryAnchors[style]...)
+}
+
 // ImageryLines returns the imagery lines the prompt gives the model for a
 // style, or nil for an unknown style. The slice is a copy.
 func ImageryLines(style string) []string {
@@ -127,7 +150,7 @@ type chunkData struct {
 // PromptVersion names the prompts and style data in this file. Bump it when
 // they change, so a script cached under the old prompt is not served as if the
 // new one had written it.
-const PromptVersion = "v1"
+const PromptVersion = "v4"
 
 var chunkTmpl = template.Must(template.New("chunk").Funcs(template.FuncMap{
 	"add": func(a, b int) int { return a + b },
@@ -151,9 +174,15 @@ Language: {{.LangName}}
 Present tense only.
 {{.StyleDescription}}
 
+TOPIC:
+This episode is about: {{.Episode}}.
+Let the whole script take place in the world of this topic.
+Do not begin sentences with the topic's name and do not repeat it as a refrain. The narrator never talks about "the episode" or "the script", only about what is there.
+
 VARIETY WITHOUT REPETITION:
-Use these imagery sets and rotate through them, never repeating a full sentence:
+{{if .ImagerySets}}Draw on these imagery sets and rotate through them. They are themes, not sentences: never copy their wording, and never repeat a full sentence:
 {{range $i, $img := .ImagerySets}}{{add $i 1}}. {{$img}}
+{{end}}{{else}}Every image comes from the world of the topic. Each paragraph brings new images from that world and none from outside it. Never repeat an image, a phrase or a full sentence.
 {{end}}
 PACING:
 {{if .IsFirstChunk}}Begin extremely gentle.{{else}}Continue from where the previous section ended.{{end}}

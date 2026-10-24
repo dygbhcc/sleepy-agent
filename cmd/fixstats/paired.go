@@ -90,7 +90,7 @@ func paired(ctx context.Context, out io.Writer, p llm.Provider, cfg script.Confi
 		topic := topics[(i-1)%len(topics)]
 		wait()
 		rctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-		s0, err := sc.Script(rctx, topic)
+		s0, err := sc.ScriptAdjusted(rctx, topic, script.Adjust{Style: styleFor(topic)})
 		cancel()
 		res.firstAttempts++
 		if err != nil {
@@ -114,12 +114,14 @@ func paired(ctx context.Context, out io.Writer, p llm.Provider, cfg script.Confi
 		for k := 0; k < trials; k++ {
 			wait()
 			rctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-			b, berr := sc.Script(rctx, topic)
+			b, berr := sc.ScriptAdjusted(rctx, topic, script.Adjust{Style: styleFor(topic)})
 			cancel()
 			st.blind = append(st.blind, judge(pol, b, berr, st.failType))
 			wait()
 			rctx, cancel = context.WithTimeout(ctx, 15*time.Minute)
-			d, derr := sc.ScriptAdjusted(rctx, topic, st.plan.Adjust(s0.Title, s0.Body))
+			da := st.plan.Adjust(s0.Title, s0.Body)
+			da.Style = styleFor(topic)
+			d, derr := sc.ScriptAdjusted(rctx, topic, da)
 			cancel()
 			st.directed = append(st.directed, judge(pol, d, derr, st.failType))
 			fmt.Fprintf(out, "    trial %d: blind %s %dw | directed %s %dw\n", k+1,

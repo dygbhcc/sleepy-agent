@@ -111,7 +111,21 @@ func (r *recorder) Script(ctx context.Context, topic string) (runner.Script, err
 	return r.record(kind, func() (runner.Script, error) { return r.inner.Script(ctx, topic) })
 }
 
+// plainAdjust is true when the only thing set is the run's style: the worker
+// sends that for a first attempt and for a blind retry.
+func plainAdjust(a script.Adjust) bool {
+	a.Style = ""
+	return a == script.Adjust{}
+}
+
 func (r *recorder) ScriptAdjusted(ctx context.Context, topic string, a script.Adjust) (runner.Script, error) {
+	if plainAdjust(a) {
+		kind := "first"
+		if r.count() > 0 {
+			kind = "same request"
+		}
+		return r.record(kind, func() (runner.Script, error) { return r.inner.ScriptAdjusted(ctx, topic, a) })
+	}
 	kind := "regenerate with repair note"
 	switch a.Mode {
 	case script.ModeContinue:
@@ -220,7 +234,7 @@ func newArm(name string, p llm.Provider, cfg script.Config, directed bool, maxAt
 }
 
 func (a *arm) runTopic(ctx context.Context, topic string) (result, error) {
-	run, err := a.st.CreateRun(ctx, topic)
+	run, err := a.st.CreateRunStyled(ctx, topic, styleFor(topic))
 	if err != nil {
 		return result{}, err
 	}
@@ -396,7 +410,7 @@ func save(dir string, i int, r result) {
 	}
 	_ = os.MkdirAll(dir, 0o755)
 	var b strings.Builder
-	fmt.Fprintf(&b, "arm: %s\ntopic: %s\nstatus: %s\n\nattempts:\n", r.arm, r.topic, r.status)
+	fmt.Fprintf(&b, "arm: %s\ntopic: %s\nstyle: %s\nstatus: %s\n\nattempts:\n", r.arm, r.topic, styleFor(r.topic), r.status)
 	for n, a := range r.attempts {
 		fmt.Fprintf(&b, "%d. %s, %d words, %s %s\n", n+1, a.kind, a.words, a.verdict, a.detail)
 	}
@@ -408,17 +422,18 @@ func main() {
 	runs := envInt("RUNS", 6, 1, 50)
 	duration := envInt("DURATION", 5, 1, 60)
 	maxAttempts := envInt("MAX_ATTEMPTS", runner.DefaultMaxAttempts, 1, 10)
-	style := os.Getenv("STYLE")
+	forcedStyle = os.Getenv("STYLE")
+	style := forcedStyle
 	if style == "" {
-		style = "Earthside"
+		style = "per topic"
 	}
-	cfg := script.Config{Style: style, DurationMin: duration, MaxTokensPerChunk: envInt("MAX_TOKENS", 0, 0, 32000)}
+	cfg := script.Config{Style: forcedStyle, DurationMin: duration, MaxTokensPerChunk: envInt("MAX_TOKENS", 0, 0, 32000)}
 	build, label, pause := source()
 
 	if os.Getenv("PAIRED") != "" {
 		trials := envInt("TRIALS", 3, 1, 10)
 		fmt.Printf("paired test, model: %s, style %s, %d minute episodes, up to %d first attempts, %d trials per arm\npause between calls: %s\n\n", label, style, duration, runs, trials, pause)
-		r, err := paired(context.Background(), os.Stdout, build(), cfg, runs, trials, pause, filepath.Join("out", "fixstats"))
+		r, err := paired(context.Background(), os.Stdout, build(), cfg, runs, trials, pause, outDir(label))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "failed:", err)
 			os.Exit(1)
@@ -428,7 +443,7 @@ func main() {
 	}
 
 	fmt.Printf("model: %s, style %s, %d minute episodes, %d topics, two arms each\npause between runs: %s\n\n", label, style, duration, runs, pause)
-	rs, engine, err := experiment(context.Background(), os.Stdout, build, cfg, runs, maxAttempts, pause, filepath.Join("out", "fixstats"))
+	rs, engine, err := experiment(context.Background(), os.Stdout, build, cfg, runs, maxAttempts, pause, outDir(label))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "failed:", err)
 		os.Exit(1)
@@ -442,7 +457,7 @@ func source() (builder, string, time.Duration) {
 	key := os.Getenv("GROQ_API_KEY")
 	if key == "" {
 		fmt.Fprintln(os.Stderr, "GROQ_API_KEY not set: running a scripted mock that writes a short script unless it is steered. This only proves the harness works, it measures no model.")
-		return func() llm.Provider { return shortWriter{} }, "scripted mock", 0
+		return func() llm.Provider { return shortWriter{} }, mockLabel, 0
 	}
 	model := os.Getenv("GROQ_MODEL")
 	if model == "" {

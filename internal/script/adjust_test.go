@@ -200,6 +200,7 @@ func TestFingerprintChangesWithEverythingThatChangesTheOutput(t *testing.T) {
 		"temperature": {Temperature: 0.9},
 		"max tokens":  {MaxTokensPerChunk: 4000},
 		"series":      {Series: "Other"},
+		"imagery":     {Imagery: ImageryTopic},
 	} {
 		if gen(t, llm.NewMock(), cfg).Fingerprint() == base {
 			t.Errorf("changing the %s must change the fingerprint", name)
@@ -207,5 +208,182 @@ func TestFingerprintChangesWithEverythingThatChangesTheOutput(t *testing.T) {
 	}
 	if !strings.Contains(base, PromptVersion) || !strings.Contains(base, "mock") {
 		t.Errorf("fingerprint %q should name the model and the prompt version", base)
+	}
+}
+
+func TestARunStyleOverridesTheConfiguredStyle(t *testing.T) {
+	m := llm.NewMock(cleanScript(12), "Rings of Saturn")
+	_, err := gen(t, m, Config{Style: "Earthside"}).GenerateAdjusted(context.Background(), "Rings of Saturn", Adjust{Style: "Cosmos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs := m.Requests()
+	if !strings.Contains(reqs[0].Messages[1].Content, "1. Soft starlight") {
+		t.Fatal("the chunk prompt must carry the Cosmos imagery, not the configured Earthside set")
+	}
+	if !strings.Contains(reqs[1].Messages[1].Content, "Style: Cosmos") {
+		t.Fatalf("the title call must see the run's style: %q", reqs[1].Messages[1].Content)
+	}
+}
+
+func TestNoRunStyleKeepsTheConfiguredStyle(t *testing.T) {
+	m := llm.NewMock(cleanScript(12), "t")
+	if _, err := gen(t, m, Config{Style: "Myth"}).GenerateAdjusted(context.Background(), "x", Adjust{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(m.Requests()[1].Messages[1].Content, "Style: Myth") {
+		t.Fatal("an empty run style must fall back to the configured one")
+	}
+}
+
+func TestAnUnknownRunStyleIsRejectedBeforeAnyModelCall(t *testing.T) {
+	for _, mode := range []Mode{ModeRegenerate, ModeContinue, ModeRetitle} {
+		m := llm.NewMock(cleanScript(12), "t")
+		a := Adjust{Mode: mode, Style: "Noir", PreviousBody: "A body."}
+		_, err := gen(t, m, Config{}).GenerateAdjusted(context.Background(), "x", a)
+		if err == nil || !strings.Contains(err.Error(), "Noir") {
+			t.Fatalf("mode %q: err = %v, want an unknown style error", mode, err)
+		}
+		if n := len(m.Requests()); n != 0 {
+			t.Fatalf("mode %q made %d model calls for a style it cannot use", mode, n)
+		}
+	}
+}
+
+func TestRetitleUsesTheRunStyle(t *testing.T) {
+	m := llm.NewMock("New Name")
+	a := Adjust{Mode: ModeRetitle, Style: "Cosmos", PreviousBody: "A body."}
+	if _, err := gen(t, m, Config{}).GenerateAdjusted(context.Background(), "x", a); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(m.Requests()[0].Messages[1].Content, "Style: Cosmos") {
+		t.Fatal("a retitle must use the run's style")
+	}
+}
+
+func TestStylesListsTheKnownOnes(t *testing.T) {
+	if got := strings.Join(Styles(), ","); got != "Cosmos,Earthside,Myth" {
+		t.Fatalf("Styles() = %q", got)
+	}
+}
+
+func TestThePromptAsksForTheTopicAndForParaphrasedImagery(t *testing.T) {
+	m := llm.NewMock(cleanScript(12), "Rings of Saturn")
+	if _, err := gen(t, m, Config{}).Generate(context.Background(), "Rings of Saturn"); err != nil {
+		t.Fatal(err)
+	}
+	reqs := m.Requests()
+	chunk := reqs[0].Messages[1].Content
+	for _, want := range []string{
+		"This episode is about: Rings of Saturn.",
+		"Let the whole script take place in the world of this topic.",
+		"Do not begin sentences with the topic's name",
+		`never talks about "the episode"`,
+		"never copy their wording",
+	} {
+		if !strings.Contains(chunk, want) {
+			t.Errorf("chunk prompt lacks %q", want)
+		}
+	}
+	if !strings.Contains(reqs[1].Messages[0].Content, "keep its main word or words in the name") {
+		t.Error("the title prompt must ask the name to keep the topic")
+	}
+}
+
+func TestThePromptNeverForcesTheTopicIntoAParagraph(t *testing.T) {
+	m := llm.NewMock(cleanScript(12), cleanScript(11), "t")
+	if _, err := gen(t, m, Config{DurationMin: 10}).Generate(context.Background(), "Rings of Saturn"); err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range m.Requests()[:2] {
+		p := r.Messages[1].Content
+		for _, banned := range []string{"Name the topic", "opening paragraph", "closing paragraph", "Come back to it"} {
+			if strings.Contains(p, banned) {
+				t.Errorf("chunk %d tells the model where to mention the topic: %q", i+1, banned)
+			}
+		}
+	}
+}
+
+func TestTopicImageryMode(t *testing.T) {
+	stock := llm.NewMock(cleanScript(12), "t")
+	if _, err := gen(t, stock, Config{Style: "Earthside"}).Generate(context.Background(), "A Lighthouse at Dusk"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stock.Requests()[0].Messages[1].Content, "1. Dew forming on cool morning grass.") {
+		t.Fatal("the default mode gives the model the stock lines")
+	}
+	if !strings.Contains(stock.Requests()[0].Messages[1].Content, "rotate through them") {
+		t.Fatal("the stock prompt is unchanged")
+	}
+
+	topic := llm.NewMock(cleanScript(12), "t")
+	if _, err := gen(t, topic, Config{Style: "Earthside", Imagery: ImageryTopic}).Generate(context.Background(), "A Lighthouse at Dusk"); err != nil {
+		t.Fatal(err)
+	}
+	p := topic.Requests()[0].Messages[1].Content
+	if strings.Contains(p, "Dew forming") || strings.Contains(p, "rotate through them") {
+		t.Fatalf("topic mode must not carry the stock lines:\n%s", p)
+	}
+	if !strings.Contains(p, "Every image comes from the world of the topic.") || !strings.Contains(p, "This episode is about: A Lighthouse at Dusk.") {
+		t.Fatalf("topic mode asks for the topic's own images:\n%s", p)
+	}
+	if !strings.Contains(p, "STYLE:") || !strings.Contains(p, "Imagery of quiet forests") {
+		t.Fatal("the style description stays")
+	}
+}
+
+func TestUnknownImageryModeIsRejected(t *testing.T) {
+	if _, err := New(llm.NewMock(), Config{Imagery: "random"}); err == nil || !strings.Contains(err.Error(), "random") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestEveryStyleHasOneAnchorPerImageryLine(t *testing.T) {
+	for _, style := range Styles() {
+		if a, l := len(ImageryAnchors(style)), len(ImageryLines(style)); a != l || a == 0 {
+			t.Errorf("%s: %d anchors for %d lines", style, a, l)
+		}
+	}
+}
+
+func TestEachAnchorAppearsInItsOwnLine(t *testing.T) {
+	for _, style := range Styles() {
+		lines, anchors := ImageryLines(style), ImageryAnchors(style)
+		for i, a := range anchors {
+			if !strings.Contains(strings.ToLower(lines[i]), a) {
+				t.Errorf("%s line %d %q does not contain its anchor %q", style, i+1, lines[i], a)
+			}
+		}
+	}
+}
+
+func TestStrictTopicModeAlsoDropsTheStylesOwnImagery(t *testing.T) {
+	m := llm.NewMock(cleanScript(12), "t")
+	if _, err := gen(t, m, Config{Style: "Earthside", Imagery: ImageryTopicStrict}).Generate(context.Background(), "A Lighthouse at Dusk"); err != nil {
+		t.Fatal(err)
+	}
+	p := m.Requests()[0].Messages[1].Content
+	for _, gone := range []string{"Dew forming", "rotate through them", "quiet forests", "moss-covered stones"} {
+		if strings.Contains(p, gone) {
+			t.Errorf("strict topic mode still has %q", gone)
+		}
+	}
+	if !strings.Contains(p, "A natural, earthly mood") || !strings.Contains(p, "Every image comes from the world of the topic.") {
+		t.Fatalf("strict mode keeps a mood and asks for the topic's world:\n%s", p)
+	}
+	// The plain topic mode keeps the style description, so the two differ.
+	m2 := llm.NewMock(cleanScript(12), "t")
+	_, _ = gen(t, m2, Config{Style: "Earthside", Imagery: ImageryTopic}).Generate(context.Background(), "x")
+	if !strings.Contains(m2.Requests()[0].Messages[1].Content, "quiet forests") {
+		t.Fatal("plain topic mode keeps the style description")
+	}
+}
+
+func TestEveryStyleHasAMood(t *testing.T) {
+	for _, s := range Styles() {
+		if styleMoods[s] == "" {
+			t.Errorf("no mood for %s", s)
+		}
 	}
 }

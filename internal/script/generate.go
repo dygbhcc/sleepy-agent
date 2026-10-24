@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"sleepy-agent/internal/llm"
@@ -29,7 +30,22 @@ type Config struct {
 	DurationMin       int     // default 5
 	Temperature       float64 // default 0.7, like Sleepy
 	MaxTokensPerChunk int     // default 1500, like Sleepy's floor
+	// Imagery says where the images come from. "stock" (the default, and what
+	// Sleepy does) gives the model the style's ten imagery lines to rotate
+	// through. "topic" gives it none and asks for images from the topic's own
+	// world.
+	Imagery string
 }
+
+// Imagery modes.
+const (
+	ImageryStock = "stock"
+	ImageryTopic = "topic"
+	// ImageryTopicStrict also replaces the style's own imagery description,
+	// which names forests, lakes and moss for Earthside, with a one line mood.
+	// The Day 8 topic runs still wandered into those places.
+	ImageryTopicStrict = "topic-strict"
+)
 
 // Result is a generated episode script.
 type Result struct {
@@ -60,6 +76,13 @@ func New(p llm.Provider, cfg Config) (*Generator, error) {
 	}
 	if _, ok := styleGuides[cfg.Style]; !ok {
 		return nil, fmt.Errorf("script: unknown style %q, want Cosmos, Earthside or Myth", cfg.Style)
+	}
+	switch cfg.Imagery {
+	case "":
+		cfg.Imagery = ImageryStock
+	case ImageryStock, ImageryTopic, ImageryTopicStrict:
+	default:
+		return nil, fmt.Errorf("script: unknown imagery mode %q, want %s, %s or %s", cfg.Imagery, ImageryStock, ImageryTopic, ImageryTopicStrict)
 	}
 	if cfg.Language == "" {
 		cfg.Language = "en"
@@ -113,6 +136,29 @@ type Adjust struct {
 	TargetWords      int     // 0 keeps the policy target
 	PreviousTitle    string  // ModeContinue keeps it, ModeRetitle falls back to it
 	PreviousBody     string  // required by ModeContinue and ModeRetitle
+	Style            string  // the run's own style; empty keeps the configured one
+}
+
+// Styles lists the style names the generator knows.
+func Styles() []string {
+	names := make([]string, 0, len(styleGuides))
+	for n := range styleGuides {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// styleFor is the style of one attempt: the run's own when it has one, else
+// the configured default.
+func (g *Generator) styleFor(a Adjust) (string, error) {
+	if a.Style == "" {
+		return g.cfg.Style, nil
+	}
+	if _, ok := styleGuides[a.Style]; !ok {
+		return "", fmt.Errorf("script: unknown style %q, want %s", a.Style, strings.Join(Styles(), ", "))
+	}
+	return a.Style, nil
 }
 
 // Fingerprint identifies everything that changes what this generator writes:
@@ -120,8 +166,8 @@ type Adjust struct {
 // fingerprint, given the same topic, are asked the same question. It is the
 // producer half of an idempotency key.
 func (g *Generator) Fingerprint() string {
-	return fmt.Sprintf("%s|%s|%s|%s|%d|%.2f|%d|%s", g.provider.Name(), g.cfg.Series, g.cfg.Style,
-		g.cfg.Language, g.cfg.DurationMin, g.cfg.Temperature, g.cfg.MaxTokensPerChunk, PromptVersion)
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%.2f|%d|%s|%s", g.provider.Name(), g.cfg.Series, g.cfg.Style,
+		g.cfg.Language, g.cfg.DurationMin, g.cfg.Temperature, g.cfg.MaxTokensPerChunk, g.cfg.Imagery, PromptVersion)
 }
 
 // Generate writes the script for a topic, chunk by chunk, then a title.
@@ -146,6 +192,10 @@ func (g *Generator) GenerateAdjusted(ctx context.Context, topic string, a Adjust
 	}
 	if a.Mode != ModeRegenerate && strings.TrimSpace(a.PreviousBody) == "" {
 		return res, fmt.Errorf("script: mode %q needs the previous script", a.Mode)
+	}
+	style, err := g.styleFor(a)
+	if err != nil {
+		return res, err
 	}
 
 	if a.Mode == ModeRetitle {
@@ -175,7 +225,14 @@ func (g *Generator) GenerateAdjusted(ctx context.Context, topic string, a Adjust
 	if a.Temperature > 0 {
 		temp = a.Temperature
 	}
-	imagery := imagerySets[g.cfg.Style]
+	imagery := imagerySets[style]
+	styleText := styleGuides[style]
+	if g.cfg.Imagery == ImageryTopic || g.cfg.Imagery == ImageryTopicStrict {
+		imagery = nil
+	}
+	if g.cfg.Imagery == ImageryTopicStrict {
+		styleText = styleMoods[style]
+	}
 
 	previous := ""
 	if continuing {
@@ -193,7 +250,7 @@ func (g *Generator) GenerateAdjusted(ctx context.Context, topic string, a Adjust
 			Series:           g.cfg.Series,
 			Episode:          topic,
 			LangName:         langNames[g.cfg.Language],
-			StyleDescription: styleGuides[g.cfg.Style],
+			StyleDescription: styleText,
 			ImagerySets:      rotateImagery(imagery, i),
 			PreviousContext:  previous,
 			ChunkMinWords:    paras * 50,
@@ -249,7 +306,11 @@ func (g *Generator) GenerateAdjusted(ctx context.Context, topic string, a Adjust
 // not lose a finished script: the fallback is the previous title when there is
 // one, the topic otherwise.
 func (g *Generator) finishTitle(ctx context.Context, topic string, a Adjust, res Result) (Result, error) {
-	title, usage, err := g.title(ctx, topic, res.Body, a)
+	style, err := g.styleFor(a)
+	if err != nil {
+		return res, err
+	}
+	title, usage, err := g.title(ctx, topic, style, res.Body, a)
 	res.Usage = addUsage(res.Usage, usage)
 	switch {
 	case err == nil:
@@ -266,12 +327,13 @@ func (g *Generator) finishTitle(ctx context.Context, topic string, a Adjust, res
 	return res, nil
 }
 
-func (g *Generator) title(ctx context.Context, topic, body string, a Adjust) (string, llm.Usage, error) {
+func (g *Generator) title(ctx context.Context, topic, style, body string, a Adjust) (string, llm.Usage, error) {
 	sys := fmt.Sprintf(`Generate a short episode name for a sleep narration video.
 Rules:
 - 2-5 words maximum. Short and evocative.
 - Language: %s
 - Poetic, calm, imagery-based. Like a place or scene name.
+- It must name the episode topic: keep its main word or words in the name.
 - No generic words like "sleep", "relaxation", "journey", "peaceful".
 - No clickbait, no ALL CAPS, no exclamation marks, no quotes.
 - Examples: "Rings of Saturn", "The Slow Moons", "Velvet Meadow", "Amber Lanterns"
@@ -280,7 +342,7 @@ Rules:
 		sys += "\n\nREPAIR NOTE (the previous title was rejected by the quality gate):\n" + note
 	}
 	user := fmt.Sprintf("Series: %s\nEpisode: %s\nStyle: %s\nDuration: %d minutes\n\nScript excerpt:\n%s",
-		g.cfg.Series, topic, g.cfg.Style, g.cfg.DurationMin, excerpt(body, 500))
+		g.cfg.Series, topic, style, g.cfg.DurationMin, excerpt(body, 500))
 
 	temp := 0.7
 	if a.Mode == ModeRetitle && a.Temperature > 0 {
@@ -289,10 +351,16 @@ Rules:
 	resp, err := g.provider.Complete(ctx, llm.Request{
 		Messages:    []llm.Message{{Role: llm.RoleSystem, Content: sys}, {Role: llm.RoleUser, Content: user}},
 		Temperature: temp,
-		MaxTokens:   100,
+		// Only a cap: a plain model stops after a few tokens. A reasoning model
+		// spends hidden tokens here too, and 100 truncated it (98 reasoning
+		// tokens seen), which silently fell back to the topic as the title.
+		MaxTokens: g.cfg.MaxTokensPerChunk,
 	})
 	if err != nil {
 		return "", resp.Usage, err
+	}
+	if resp.FinishReason == "length" {
+		return "", resp.Usage, fmt.Errorf("script: title %w", ErrTruncated)
 	}
 	title := strings.TrimSpace(strings.Trim(strings.TrimSpace(resp.Content), "\"'"+"“”‘’"))
 	if title == "" || strings.Contains(title, "\n") {

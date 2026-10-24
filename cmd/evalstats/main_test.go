@@ -12,6 +12,7 @@ import (
 
 	"sleepy-agent/internal/eval"
 	"sleepy-agent/internal/judge"
+	"sleepy-agent/internal/script"
 )
 
 const para1 = "Moss covers the old wall near the quiet garden tonight. Rain taps the tin roof above the sleeping kitchen. " +
@@ -20,7 +21,7 @@ const para2 = "Dew forming on cool morning grass. Dew forming on cool morning gr
 	"Dew forming on cool morning grass near the gate. Dew forming on cool morning grass once more."
 
 func fixstatsFile(final string, attempts string) string {
-	return "arm: directed\ntopic: t\nstatus: DONE\n\nattempts:\n" + attempts + "\nfinal script (what the run holds):\n\n" + final + "\n"
+	return "arm: directed\nstatus: DONE\n\nattempts:\n" + attempts + "\nfinal script (what the run holds):\n\n" + final + "\n"
 }
 
 func TestParseFixstatsFileWithAContinuation(t *testing.T) {
@@ -141,8 +142,8 @@ func TestJudgeAllAndReport(t *testing.T) {
 	c := mustParse(t, "c.md", "Moon", para1+" extra")
 	rv := &fakeReviewer{
 		byBody: map[string]judge.Verdict{
-			a.body: {Calm: 5, Coherence: 5, Variety: 4, Pass: true, MinScore: 3},
-			b.body: {Calm: 4, Coherence: 1, Variety: 2, Pass: false, MinScore: 3, Reason: "forest images in a library"},
+			a.body: {Calm: 5, Coherence: 5, Variety: 4, Narration: 5, Pass: true, MinScore: 3},
+			b.body: {Calm: 4, Coherence: 1, Variety: 2, Narration: 4, Pass: false, MinScore: 3, Reason: "forest images in a library", Evidence: "The river bends"},
 		},
 		errOn: "extra",
 	}
@@ -152,8 +153,8 @@ func TestJudgeAllAndReport(t *testing.T) {
 	}
 	var out bytes.Buffer
 	judgeReport(&out, []sample{a, b, c}, vs, 3)
-	for _, want := range []string{"| a.md | 5 | 5 | 4 | pass |", "| b.md | 4 | 1 | 2 | would reject | forest images in a library |",
-		"| c.md | | | | error | provider down |", "1 pass, 1 would reject, 1 errors"} {
+	for _, want := range []string{"| a.md | 5 | 5 | 4 | 5 | pass |", "| b.md | 4 | 1 | 2 | 4 | would reject | forest images in a library | The river bends |",
+		"| c.md | | | | | error | provider down |", "1 pass, 1 would reject, 1 errors"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("report misses %q:\n%s", want, out.String())
 		}
@@ -162,8 +163,8 @@ func TestJudgeAllAndReport(t *testing.T) {
 
 func TestLabelsRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "labels.csv")
-	a := mustParse(t, "a.md", "t", para1)
-	b := mustParse(t, "b.md", "t", para2)
+	a := mustParse(t, "a.md", "", para1)
+	b := mustParse(t, "b.md", "", para2)
 	if _, err := readLabels(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing file: %v", err)
 	}
@@ -184,9 +185,9 @@ func TestLabelsRoundTrip(t *testing.T) {
 }
 
 func TestAgreementCountsBothCheckers(t *testing.T) {
-	fine := mustParse(t, "fine.md", "t", para1)
-	echo := mustParse(t, "echo.md", "t", para1+"\n\n"+para2+"\n\n"+para2+"\n\n"+para2)
-	other := mustParse(t, "other.md", "t", strings.Replace(para1, "Moss", "Ivy", 1))
+	fine := mustParse(t, "fine.md", "", para1)
+	echo := mustParse(t, "echo.md", "", para1+"\n\n"+para2+"\n\n"+para2+"\n\n"+para2)
+	other := mustParse(t, "other.md", "", strings.Replace(para1, "Moss", "Ivy", 1))
 	samples := []sample{fine, echo, other}
 	labels := map[string]string{"fine.md": "good", "echo.md": "bad", "other.md": "bad"}
 	vs := verdicts{}
@@ -214,7 +215,7 @@ func TestAgreementCountsBothCheckers(t *testing.T) {
 
 func TestAgreementWithNothingLabelled(t *testing.T) {
 	var out bytes.Buffer
-	agreementReport(&out, []sample{mustParse(t, "a.md", "t", para1)}, map[string]string{}, eval.DefaultThresholds, "Earthside", nil)
+	agreementReport(&out, []sample{mustParse(t, "a.md", "", para1)}, map[string]string{}, eval.DefaultThresholds, "Earthside", nil)
 	if !strings.Contains(out.String(), "0 of 1 scripts labelled") || strings.Contains(out.String(), "shadow judge") {
 		t.Errorf("%s", out.String())
 	}
@@ -227,7 +228,7 @@ func TestAgreementTreatsEchoesAsAConcernOnTheirOwn(t *testing.T) {
 		"Slowly the moss growing on ancient stones drinks the cool evening air around it. " +
 		"Far away the fireflies drifting in warm dusk air blink above the sleeping fields. " +
 		"Gently the snow falling softly on sleeping fields covers every hedge and fence post."
-	echo := mustParse(t, "echo.md", "t", lines+"\n\n"+lines+"\n\n"+lines)
+	echo := mustParse(t, "echo.md", "", lines+"\n\n"+lines+"\n\n"+lines)
 	if n := eval.Echoes(echo.body, "Earthside"); n != 12 {
 		t.Fatalf("test setup: %d echoes, want 12", n)
 	}
@@ -241,7 +242,7 @@ func TestAgreementTreatsEchoesAsAConcernOnTheirOwn(t *testing.T) {
 }
 
 func TestAgreementLeavesJudgeErrorsOut(t *testing.T) {
-	a := mustParse(t, "a.md", "t", para1)
+	a := mustParse(t, "a.md", "", para1)
 	vs := verdicts{"a.md": struct {
 		v   judge.Verdict
 		err error
@@ -250,5 +251,42 @@ func TestAgreementLeavesJudgeErrorsOut(t *testing.T) {
 	agreementReport(&out, []sample{a}, map[string]string{"a.md": "good"}, eval.DefaultThresholds, "Earthside", vs)
 	if !strings.Contains(out.String(), "| shadow judge | 0 | 0 |") {
 		t.Errorf("a judge error is not a verdict:\n%s", out.String())
+	}
+}
+
+func TestEchoesAreCountedAgainstTheStyleTheScriptWasWrittenUnder(t *testing.T) {
+	cosmos := script.ImageryLines("Cosmos")[0]
+	body := strings.Repeat(cosmos+" ", 12)
+	text := "title: Soft Lake\ntopic: Soft Lake\nstyle: Cosmos\n\n" + body + "\n"
+	s, ok := parse("c.md", text)
+	if !ok || s.style != "Cosmos" {
+		t.Fatalf("parse: ok %v style %q", ok, s.style)
+	}
+	var out bytes.Buffer
+	report(&out, []sample{s}, eval.DefaultThresholds, "Earthside") // the default must not win
+	if !strings.Contains(out.String(), "verbatim copies of the prompt's imagery lines") {
+		t.Fatalf("a Cosmos script pasting Cosmos lines must be flagged even when the default style is Earthside:\n%s", out.String())
+	}
+}
+
+func TestAFileWithoutAStyleFallsBackToTheDefault(t *testing.T) {
+	s := mustParse(t, "a.md", "", para1)
+	if s.style != "" || s.styleOr("Myth") != "Myth" {
+		t.Fatalf("style %q", s.style)
+	}
+}
+
+func TestReportShowsWhetherTheTopicAndTheTitleCarryTheTopic(t *testing.T) {
+	on, _ := parse("on.md", "title: Quiet Library\ntopic: The Quiet Library\n\nThe library rests in a quiet hush.\n")
+	off, _ := parse("off.md", "title: Lanterned Garden\ntopic: The Quiet Library\n\nSoft paper rests on a shelf.\n")
+	var out bytes.Buffer
+	report(&out, []sample{on, off}, eval.DefaultThresholds, "Earthside")
+	got := out.String()
+	if l := lineWith(got, "on.md"); !strings.Contains(l, "| 2/2 (2) | yes |") {
+		t.Errorf("on-topic row: %s", l)
+	}
+	l := lineWith(got, "off.md")
+	if !strings.Contains(l, "| 0/2 (0) | no |") || !strings.Contains(l, "none of the topic's words appear in the script") || !strings.Contains(l, "the title keeps none of the topic's words") {
+		t.Errorf("off-topic row: %s", l)
 	}
 }

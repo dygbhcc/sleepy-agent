@@ -75,13 +75,19 @@ func (s *File) ttl() time.Duration {
 }
 
 // CreateRun adds a run in PENDING.
-func (s *File) CreateRun(_ context.Context, topic string) (domain.Run, error) {
+func (s *File) CreateRun(ctx context.Context, topic string) (domain.Run, error) {
+	return s.CreateRunStyled(ctx, topic, "")
+}
+
+// CreateRunStyled adds a run in PENDING with its own style.
+func (s *File) CreateRunStyled(_ context.Context, topic, style string) (domain.Run, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock()
 	r := &domain.Run{
 		ID:        fmt.Sprintf("run-%d", len(s.runs)+1),
 		Topic:     topic,
+		Style:     style,
 		Status:    domain.StatusPending,
 		Outputs:   map[string]string{},
 		CreatedAt: now,
