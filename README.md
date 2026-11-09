@@ -11,14 +11,17 @@ running example is an automated episode pipeline: a topic goes in, an
 episode (title, script, later narration and video) comes out, with quality
 gates, self-healing and human approval where it matters.
 
-> Status: **Day 8 of 11.** The state machine and worker loop are ported from
+> Status: **Day 9 of 12.** The state machine and worker loop are ported from
 > Sleepy, and a walking skeleton runs a mock episode end to end. Scripts come
 > from the ported Sleepy generator and pass a QA gate before the run may
 > advance: a rejected script gets a fix chosen by its failure code (a
 > continuation for a short script, a repair note naming banned words), then is
 > parked for a human. A script already accepted for the same topic and settings
 > is served from a cache. A shadow judge can score accepted scripts without
-> any power over the run. Publishing waits for a human.
+> any power over the run. Publishing waits for a human. What a bad script is
+> lives in `docs/quality-spec.md` (a draft, written by the owner); code checks
+> and a judge checklist implement it, `go run ./cmd/specstats` measures them
+> against the owner's labels, and none of them acts on a run yet.
 
 ## Run it
 
@@ -58,8 +61,8 @@ flowchart LR
 ```
 
 Not built yet, but where it goes: a fix engine that tells the model why it was
-rejected (Day 7), QA gates for voice, render and package once those adapters
-are real (Day 10), budgets and autonomy levels (Day 9).
+rejected (Day 7), approval, budgets and autonomy levels (Day 10), QA gates for
+voice, render and package once those adapters are real (Day 11).
 
 Design rules the code follows:
 
@@ -86,7 +89,7 @@ Design rules the code follows:
 | `internal/runner` | Worker loop, QA gate and approval gate, adapter interfaces and mocks | ported, reduced |
 | `internal/fix` | Fix engine: a catalog of fixes keyed by failure code, a scorer that learns which fix works, repair notes built from the QA report | ported, changed |
 | `internal/eval` | Quality metrics beyond the gate (sentence shape, repeated phrases, copied prompt lines, what a continuation adds). Measures, never rejects | new |
-| `internal/judge` | The shadow judge: a model scores an accepted script 1 to 5 on calm, coherence and variety; recorded in the run, never acted on | new |
+| `internal/judge` | The shadow judge: a model scores an accepted script 1 to 5 on calm, coherence and variety; recorded in the run, never acted on; also a checklist judge that answers yes or no per defect with a quote (Day 9) | new |
 | `internal/qa` | The script QA gate: word count, banned phrases, sleep safety, title. Says pass or fail and why, repairs nothing | ported |
 | `internal/store` | Run storage: memory or JSON file | new (Sleepy uses Postgres) |
 | `internal/policy`, `internal/errs` | Duration limits, transient error type | ported |
