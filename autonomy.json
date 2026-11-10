@@ -1,0 +1,10 @@
+{
+  "level": 1,
+  "evidence": {
+    "owner_labelled": false,
+    "bad_scripts": 15,
+    "bad_let_through": 9,
+    "source": "strict-d, labels written by Claude, code checks plus judge checklist, one judge, single run",
+    "measured_on": "2026-11-08"
+  }
+}

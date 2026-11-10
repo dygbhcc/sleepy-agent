@@ -11,7 +11,7 @@ running example is an automated episode pipeline: a topic goes in, an
 episode (title, script, later narration and video) comes out, with quality
 gates, self-healing and human approval where it matters.
 
-> Status: **Day 9 of 12.** The state machine and worker loop are ported from
+> Status: **Day 10 of 12.** The state machine and worker loop are ported from
 > Sleepy, and a walking skeleton runs a mock episode end to end. Scripts come
 > from the ported Sleepy generator and pass a QA gate before the run may
 > advance: a rejected script gets a fix chosen by its failure code (a
@@ -21,14 +21,17 @@ gates, self-healing and human approval where it matters.
 > any power over the run. Publishing waits for a human. What a bad script is
 > lives in `docs/quality-spec.md` (a draft, written by the owner); code checks
 > and a judge checklist implement it, `go run ./cmd/specstats` measures them
-> against the owner's labels, and none of them acts on a run yet.
+> against the owner's labels, and none of them acts on a run yet. What the
+> pipeline may do without a human is an autonomy policy (`autonomy.json`,
+> `docs/autonomy-policy.md`): the file asks for a level, the code grants it only
+> from measured evidence, and today that is review, so publishing waits.
 
 ## Run it
 
 Needs Go 1.23 or newer. No API key, no network.
 
 ```bash
-make skeleton # one mock episode through the state machine: the QA gate rejects a short script once, publish waits for approval
+make skeleton # one mock episode through the state machine: the QA gate rejects a short script once, publish waits for approval; reads autonomy.json
 make demo     # the agent loop; scripted mock, or a real model if GROQ_API_KEY and GROQ_MODEL are set
 make script   # generate scripts with the ported generator, measure the raw failure rate and what the QA gate would say (needs GROQ_API_KEY and GROQ_MODEL for a real result; MAX_TOKENS and REASONING_EFFORT low|medium|high, for gpt-oss, change the token budget and reasoning)
 make fixstats # blind retry vs directed fix on the same topics, per failure (needs GROQ_API_KEY and GROQ_MODEL for a real result; same MAX_TOKENS and REASONING_EFFORT settings as make script; PAIRED=1 starts from the same rejected script for both strategies, TRIALS sets the trials per arm)
@@ -93,6 +96,7 @@ Design rules the code follows:
 | `internal/qa` | The script QA gate: word count, banned phrases, sleep safety, title. Says pass or fail and why, repairs nothing | ported |
 | `internal/store` | Run storage: memory or JSON file | new (Sleepy uses Postgres) |
 | `internal/policy`, `internal/errs` | Duration limits, transient error type | ported |
+| `internal/policy` (autonomy) | Autonomy levels (halt, review, unlisted) and the evidence a level needs, with the bound computed in code | new |
 | `internal/script` | Script generator ported from Sleepy (chunked, same prompts) and `Measure`, which counts broken prompt rules without judging | ported |
 | `internal/scenario` | The one task `demo` and `compare` share, so both measure the same thing | new |
 | `cmd/demo`, `cmd/skeleton`, `cmd/compare`, `cmd/scriptstats`, `cmd/fixstats`, `cmd/evalstats` | The agent loop demo, the walking skeleton, the adapter comparison, the script failure rate, blind retry vs directed fix, the metrics the gate lacks | new |
@@ -157,9 +161,10 @@ Design rules the code follows:
 | 6 | Script QA gate ported (Sleepy's thresholds); a rejection is retried, then parked for review; the known gap tests flip to reject and the naive pipeline is removed |
 | 7 | Idempotency (input hashes) and FixEngine; Postgres behind `Store` only if needed |
 | 8 | Shadow-mode LLM reasoner and evals |
-| 9 | Approval gates, autonomy levels, guardrails (budget, attempts, allow-list) |
-| 10 | Real voice, render and YouTube adapters, first real upload as unlisted behind approval |
-| 11 | Launch: CI, Docker compose, one-command demo, walkthrough |
+| 9 | Written quality spec and the checks built from it (code checks, judge checklist, measurement against labels) |
+| 10 | Autonomy policy: levels earned from evidence, allow-list, halt, publish capped at unlisted |
+| 11 | Real voice, render and YouTube adapters, first real upload as unlisted behind approval |
+| 12 | Launch: CI, Docker compose, one-command demo, walkthrough |
 
 Every day's failures are written down in [FAILURE_LOG.md](FAILURE_LOG.md).
 

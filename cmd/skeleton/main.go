@@ -15,6 +15,7 @@ import (
 	"sleepy-agent/internal/agent"
 	"sleepy-agent/internal/fix"
 	"sleepy-agent/internal/llm"
+	"sleepy-agent/internal/policy"
 	"sleepy-agent/internal/runner"
 	"sleepy-agent/internal/script"
 	"sleepy-agent/internal/store"
@@ -33,6 +34,16 @@ func main() {
 
 func run(ctx context.Context, topic string) error {
 	st := store.NewMemory(nil)
+	auto, err := loadAutonomy()
+	if err != nil {
+		return err
+	}
+	level, why := auto.Granted()
+	fmt.Printf("autonomy  : asked for %s, granted %s", auto.Level, level)
+	if why != "" {
+		fmt.Printf(" (%s)", why)
+	}
+	fmt.Println()
 	// The first attempt is far too short, so the QA gate rejects it and the worker
 	// asks the fix engine what to do. A too short script gets a continuation,
 	// which appends to it and keeps its title. The first attempt is one script
@@ -47,7 +58,7 @@ func run(ctx context.Context, topic string) error {
 		Voice:     &runner.MockVoice{},
 		Renderer:  &runner.MockRenderer{},
 		Publisher: runner.DryRunPublisher{}, // the default: reports, never publishes
-	}, runner.PublishGate{Runs: st}, runner.Config{WorkerID: "demo", Observer: printEvent, Fixes: fix.NewEngine()})
+	}, runner.AutonomyGate{Runs: st, Autonomy: auto}, runner.Config{WorkerID: "demo", Observer: printEvent, Fixes: fix.NewEngine()})
 	if err != nil {
 		return err
 	}
@@ -88,4 +99,18 @@ func printEvent(e runner.Event) {
 	default:
 		fmt.Printf("  %-9s %s -> %s\n", e.Stage, e.From, e.To)
 	}
+}
+
+// loadAutonomy reads the policy file. Without one the pipeline does not guess:
+// it stops, because an absent policy is not a permission.
+func loadAutonomy() (policy.Autonomy, error) {
+	path := os.Getenv("AUTONOMY_FILE")
+	if path == "" {
+		path = "autonomy.json"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return policy.Autonomy{}, fmt.Errorf("read autonomy policy: %w", err)
+	}
+	return policy.ParseAutonomy(data)
 }

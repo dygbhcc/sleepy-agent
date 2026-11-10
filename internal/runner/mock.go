@@ -109,9 +109,12 @@ func (m *MockRenderer) Package(ctx context.Context, videoRef string) (string, er
 // MockPublisher records every publish request. Tests use it to prove that a
 // publish did not happen. Safe for concurrent use.
 type MockPublisher struct {
-	q        failQueue
-	mu       sync.Mutex
-	requests []PublishRequest
+	// Visibility is what Publish reports; empty means dry-run. A test sets it
+	// to something wider to play a publisher that ignores MaxVisibility.
+	Visibility string
+	q          failQueue
+	mu         sync.Mutex
+	requests   []PublishRequest
 }
 
 // FailNext queues errors for the next calls.
@@ -138,5 +141,9 @@ func (m *MockPublisher) Publish(ctx context.Context, req PublishRequest) (Publis
 	if err := m.q.next(); err != nil {
 		return PublishResult{}, err
 	}
-	return PublishResult{ID: "mock:" + req.RunID, Visibility: "dry-run"}, nil
+	v := m.Visibility
+	if v == "" {
+		v = VisibilityDryRun
+	}
+	return PublishResult{ID: "mock:" + req.RunID, Visibility: v}, nil
 }

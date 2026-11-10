@@ -243,9 +243,17 @@ func buildStages(s Steps, cache ScriptCache) map[domain.RunStatus]stage {
 			}
 			res, err := s.Publisher.Publish(ctx, PublishRequest{
 				RunID: r.ID, Title: r.Outputs[domain.OutputTitle], VideoRef: r.Outputs[domain.OutputPackage],
+				MaxVisibility: VisibilityUnlisted,
 			})
 			if err != nil {
 				return nil, err
+			}
+			// Rule 7. The publisher has already acted, so this cannot undo it:
+			// it fails the run for good (no retry, a retry would publish again)
+			// and names the result so a human can take it down.
+			if res.Visibility != VisibilityDryRun && res.Visibility != VisibilityUnlisted {
+				return nil, fmt.Errorf("publisher %q reported visibility %q, only %s and %s are allowed; take it down by hand",
+					res.ID, res.Visibility, VisibilityDryRun, VisibilityUnlisted)
 			}
 			return map[string]string{domain.OutputPublished: res.ID + " (" + res.Visibility + ")"}, nil
 		}},

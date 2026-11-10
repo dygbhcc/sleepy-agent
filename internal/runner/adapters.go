@@ -51,18 +51,29 @@ type Renderer interface {
 	Package(ctx context.Context, videoRef string) (ref string, err error)
 }
 
+// What a publish may result in. Public is not in the list on purpose: no
+// policy level allows it (rule 7), and the worker fails a run whose publisher
+// says otherwise.
+const (
+	VisibilityDryRun   = "dry-run"
+	VisibilityUnlisted = "unlisted"
+)
+
 // PublishRequest is everything a Publisher needs. It carries the run ID so a
 // publisher can be idempotent.
 type PublishRequest struct {
 	RunID    string
 	Title    string
 	VideoRef string
+	// MaxVisibility is the widest visibility the worker allows. A publisher
+	// must not go beyond it.
+	MaxVisibility string
 }
 
 // PublishResult says what the Publisher did.
 type PublishResult struct {
 	ID         string
-	Visibility string // "dry-run", "unlisted", "public"
+	Visibility string // VisibilityDryRun or VisibilityUnlisted; anything else fails the run
 }
 
 // Publisher puts a finished episode where viewers can see it.
@@ -76,7 +87,7 @@ type DryRunPublisher struct{}
 
 // Publish implements Publisher.
 func (DryRunPublisher) Publish(_ context.Context, req PublishRequest) (PublishResult, error) {
-	return PublishResult{ID: "dry-run:" + req.RunID, Visibility: "dry-run"}, nil
+	return PublishResult{ID: "dry-run:" + req.RunID, Visibility: VisibilityDryRun}, nil
 }
 
 // LLMScripter writes scripts with an llm.Provider, using the generator ported
